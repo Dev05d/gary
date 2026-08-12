@@ -322,16 +322,50 @@ class ResolutionBand(str, Enum):
     IGNORE = "ignore"
 
 
-AUTO_LINK_THRESHOLD = 0.90
+class MergePolicy(str, Enum):
+    """How eager Gary is to link identities without asking.
+
+    ALWAYS_ASK is the default and the shipped behaviour: no merge ever happens
+    without explicit approval. Confidence still matters — it orders the review
+    queue and filters out noise — it just never authorises a merge on its own.
+    """
+
+    ALWAYS_ASK = "always_ask"
+    CONSERVATIVE = "conservative"  # auto only at near-certainty
+    MODERATE = "moderate"  # auto on strong structural evidence
+
+
+AUTO_LINK_THRESHOLD_CONSERVATIVE = 0.90
+AUTO_LINK_THRESHOLD_MODERATE = 0.80
 SUGGEST_THRESHOLD = 0.60
 
+DEFAULT_MERGE_POLICY = MergePolicy.ALWAYS_ASK
 
-def band_for(confidence: float) -> ResolutionBand:
-    if confidence >= AUTO_LINK_THRESHOLD:
-        return ResolutionBand.AUTO_LINK
-    if confidence >= SUGGEST_THRESHOLD:
+
+def band_for(
+    confidence: float, policy: MergePolicy = DEFAULT_MERGE_POLICY
+) -> ResolutionBand:
+    """Map a confidence score to an action, under the configured policy.
+
+    Under ALWAYS_ASK nothing reaches AUTO_LINK, however certain the evidence:
+    a wrong merge quietly cross-contaminates two people's history, and the
+    cost of one tap is far lower than the cost of unpicking that later.
+    """
+    if confidence < SUGGEST_THRESHOLD:
+        return ResolutionBand.IGNORE
+
+    if policy is MergePolicy.ALWAYS_ASK:
         return ResolutionBand.SUGGEST
-    return ResolutionBand.IGNORE
+    if policy is MergePolicy.CONSERVATIVE:
+        threshold = AUTO_LINK_THRESHOLD_CONSERVATIVE
+    else:
+        threshold = AUTO_LINK_THRESHOLD_MODERATE
+
+    return (
+        ResolutionBand.AUTO_LINK
+        if confidence >= threshold
+        else ResolutionBand.SUGGEST
+    )
 
 
 @dataclass
@@ -356,10 +390,15 @@ class LinkProposal:
     confidence: float
     signal: MatchSignal
     evidence: str = ""
+    policy: MergePolicy = DEFAULT_MERGE_POLICY
 
     @property
     def band(self) -> ResolutionBand:
-        return band_for(self.confidence)
+        return band_for(self.confidence, self.policy)
+
+    @property
+    def needs_approval(self) -> bool:
+        return self.band is ResolutionBand.SUGGEST
 
 
 #: Domains where sharing a domain implies nothing about identity.
@@ -376,7 +415,11 @@ def is_public_domain(domain: str) -> bool:
 
 
 def propose_link(
-    a: IdentityRecord, b: IdentityRecord, *, signature_handles: Optional[Set[str]] = None
+    a: IdentityRecord,
+    b: IdentityRecord,
+    *,
+    signature_handles: Optional[Set[str]] = None,
+    policy: MergePolicy = DEFAULT_MERGE_POLICY,
 ) -> Optional[LinkProposal]:
     """Strongest signal linking two identities, or None.
 
@@ -391,7 +434,7 @@ def propose_link(
     if a.value and a.value == b.value:
         return LinkProposal(
             a.id, b.id, SIGNAL_CONFIDENCE[MatchSignal.SAME_IDENTITY],
-            MatchSignal.SAME_IDENTITY, f"identical handle {a.value}",
+            MatchSignal.SAME_IDENTITY, f"identical handle {a.value}", policy,
         )
 
     # A signature that lists the other handle is near-proof: the person
@@ -399,7 +442,7 @@ def propose_link(
     if signature_handles and b.value in signature_handles:
         return LinkProposal(
             a.id, b.id, SIGNAL_CONFIDENCE[MatchSignal.SIGNATURE_BLOCK],
-            MatchSignal.SIGNATURE_BLOCK, f"signature lists {b.value}",
+            MatchSignal.SIGNATURE_BLOCK, f"signature lists {b.value}", policy,
         )
 
     best: Optional[LinkProposal] = None
@@ -425,7 +468,7 @@ def propose_link(
 
             confidence = SIGNAL_CONFIDENCE[signal]
             if best is None or confidence > best.confidence:
-                best = LinkProposal(a.id, b.id, confidence, signal, evidence)
+                best = LinkProposal(a.id, b.id, confidence, signal, evidence, policy)
 
     return best
 
@@ -434,6 +477,7 @@ def propose_links(
     identities: Sequence[IdentityRecord],
     *,
     signature_handles: Optional[Dict[str, Set[str]]] = None,
+    policy: MergePolicy = DEFAULT_MERGE_POLICY,
 ) -> List[LinkProposal]:
     """All proposals above the ignore threshold, strongest first.
 
@@ -472,7 +516,7 @@ def propose_links(
                     continue
                 seen.add(pair)
                 proposal = propose_link(
-                    a, b, signature_handles=signature_handles.get(a.id)
+                    a, b, signature_handles=signature_handles.get(a.id), policy=policy
                 )
                 if proposal and proposal.band is not ResolutionBand.IGNORE:
                     proposals.append(proposal)

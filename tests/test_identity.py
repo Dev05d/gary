@@ -6,6 +6,7 @@ import pytest
 
 from backend.pipeline.identity import (
     IdentityKind,
+    MergePolicy,
     IdentityRecord,
     MatchSignal,
     ResolutionBand,
@@ -192,12 +193,13 @@ def test_public_domains_identified():
 
 # ---------------------------------------------------------------- proposals
 
-def test_identical_handles_link_with_certainty():
+def test_identical_handles_score_highest_but_still_ask():
     a = ident("i1", "john@example.com", "John")
     b = ident("i2", "JOHN@example.com", "J. Smith")
     p = propose_link(a, b)
     assert p.signal is MatchSignal.SAME_IDENTITY
-    assert p.band is ResolutionBand.AUTO_LINK
+    assert p.confidence == 1.0
+    assert p.band is ResolutionBand.SUGGEST
 
 
 def test_same_name_at_shared_private_domain_auto_links_band_check():
@@ -246,19 +248,43 @@ def test_identity_never_links_to_itself():
 
 # ------------------------------------------------------------------- bands
 
+@pytest.mark.parametrize("confidence", [1.00, 0.98, 0.90, 0.85, 0.70, 0.60])
+def test_nothing_ever_auto_links_by_default(confidence):
+    """Shipped policy: every merge is the user's call, however certain."""
+    assert band_for(confidence) is ResolutionBand.SUGGEST
+
+
+@pytest.mark.parametrize("confidence", [0.59, 0.30, 0.0])
+def test_weak_evidence_is_still_dropped(confidence):
+    """Always-ask must not mean burying the user in noise."""
+    assert band_for(confidence) is ResolutionBand.IGNORE
+
+
 @pytest.mark.parametrize(
-    "confidence,expected",
+    "policy,confidence,expected",
     [
-        (1.00, ResolutionBand.AUTO_LINK),
-        (0.90, ResolutionBand.AUTO_LINK),
-        (0.89, ResolutionBand.SUGGEST),
-        (0.60, ResolutionBand.SUGGEST),
-        (0.59, ResolutionBand.IGNORE),
-        (0.0, ResolutionBand.IGNORE),
+        (MergePolicy.CONSERVATIVE, 1.00, ResolutionBand.AUTO_LINK),
+        (MergePolicy.CONSERVATIVE, 0.90, ResolutionBand.AUTO_LINK),
+        (MergePolicy.CONSERVATIVE, 0.85, ResolutionBand.SUGGEST),
+        (MergePolicy.MODERATE, 0.85, ResolutionBand.AUTO_LINK),
+        (MergePolicy.MODERATE, 0.80, ResolutionBand.AUTO_LINK),
+        (MergePolicy.MODERATE, 0.70, ResolutionBand.SUGGEST),
+        (MergePolicy.MODERATE, 0.59, ResolutionBand.IGNORE),
     ],
 )
-def test_confidence_bands(confidence, expected):
-    assert band_for(confidence) is expected
+def test_opt_in_policies_relax_the_rule(policy, confidence, expected):
+    assert band_for(confidence, policy) is expected
+
+
+def test_proposals_carry_the_policy_into_their_band():
+    a = ident("i1", "john@example.com", "John Smith")
+    b = ident("i2", "JOHN@example.com", "J. Smith")
+    assert propose_link(a, b).band is ResolutionBand.SUGGEST
+    assert propose_link(a, b).needs_approval is True
+    assert (
+        propose_link(a, b, policy=MergePolicy.CONSERVATIVE).band
+        is ResolutionBand.AUTO_LINK
+    )
 
 
 # ------------------------------------------------------------------ batching
