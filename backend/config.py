@@ -70,13 +70,31 @@ class Settings(BaseSettings):
     hybrid_weight_recency: float = 0.5
     hybrid_weight_importance: float = 0.5
 
-    # --- Sync (Milestones 2 & 4) ------------------------------------------
-    gmail_poll_interval_seconds: int = 300
-    gmail_backfill_days: int = 365
-    gmail_max_backfill_messages: int = 25000
-    calendar_poll_interval_seconds: int = 600
-    calendar_past_days: int = 90
-    calendar_future_days: int = 365
+    # --- Sync (Milestones 2, 6, 7) ----------------------------------------
+    # Live-only by design: a watermark is recorded when an account connects and
+    # only what arrives after it is ingested. See docs/ARCHITECTURE.md §2.
+    gmail_poll_interval_seconds: int = 60
+    #: Bounded one-off bootstrap so day one is not empty. 0 = pure live.
+    seed_window_days: int = 0
+    seed_max_messages: int = 500
+
+    # A calendar's value is in the future, so it syncs a window rather than a
+    # watermark — otherwise tomorrow's meeting, created last week, is invisible.
+    calendar_poll_interval_seconds: int = 300
+    calendar_past_days: int = 7
+    calendar_future_days: int = 90
+
+    # iMessage: consecutive messages closer together than this are one session,
+    # which is the unit that gets summarised and embedded.
+    imessage_session_gap_minutes: int = 30
+    imessage_poll_interval_seconds: int = 30
+
+    # --- Extraction (Milestone 3) -----------------------------------------
+    extraction_min_confidence: float = 0.35
+    extraction_require_evidence: bool = True
+    embed_min_tokens: int = 15
+    embed_automated_messages: bool = False
+    user_timezone: str = "UTC"
 
     # --- Classification & notifications (Milestone 6) ---------------------
     classify_new_messages: bool = True

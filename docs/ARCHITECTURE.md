@@ -1,284 +1,555 @@
 # Architecture
 
-This document covers the design decisions behind Gary, the problems found in
-the original specification, and the target schema for later milestones.
+Design decisions behind Gary, the problems found in the original
+specification, and the data model that later milestones build out.
+
+**Revision 2** reflects two decisions made after the first pass:
+
+- **Live-only ingestion.** No historical backfill. Gary starts recording when
+  you connect an account.
+- **Three storage planes instead of one.** Embeddings are for prose. Structured
+  facts and extracted commitments get real columns and real indexes.
+
+Scope for the next phase is deliberately narrow: **Gmail, Google Calendar, and
+iMessage.** Nothing else.
 
 ---
 
-## 1. Problems with the original spec
+## 1. Should email be stored as semantic vectors?
 
-The spec is strong — the core principle ("the LLM is not the database") is
-exactly right. These are the places where following it literally would cause
-trouble.
+Partly. Embedding a whole email is the wrong default, and it is worth being
+precise about why, because it determines the entire data model.
 
-### 1.1 Two of the requested connectors cannot be built as described
+An email contains at least three kinds of information, and they want three
+different storage strategies:
 
-The opening request asks for Gmail, iMessage, Instagram DMs, and Discord DMs.
-Section 2 then says "do NOT scrape services when an official API exists" and
-"do NOT implement anything that bypasses authentication or platform
-restrictions". Those two statements conflict for half the list:
-
-- **Discord DMs.** The bot API has no access to a *user's* private DMs. The
-  only way to read them live is a self-bot driving a user token, which is
-  explicitly against Discord's ToS and is enforced with account termination.
-- **Instagram DMs.** The Messaging API is a customer-service product: it covers
-  Business/Creator accounts receiving messages *from customers*, requires a
-  linked Facebook Page and app review, and does not expose personal DM history.
-
-Both services do offer **official data exports** (GDPR downloads). That path is
-legitimate, requires no risky credentials, and yields the full conversation
-history. It is a periodic snapshot, not a live stream — that is a real
-limitation and the UI will say so rather than implying live sync.
-
-- **iMessage** is the opposite case, and the spec is too pessimistic about it.
-  `~/Library/Messages/chat.db` is a SQLite database of your own messages on
-  your own Mac. Reading it with Full Disk Access that you grant is not an auth
-  bypass. The connector opens an immutable read-only copy so it can never
-  corrupt the live database. Constraints worth knowing up front: macOS only,
-  only this machine's history, and it breaks if Apple changes the schema.
-
-**Decision:** four connector *classes*, not one.
-
-| Class | Mechanism | Freshness | Examples |
+| Kind | Example | Right storage | Why |
 |---|---|---|---|
-| `PushConnector` | Webhook / Pub/Sub | seconds | Gmail |
-| `PollConnector` | Incremental sync token | minutes | Calendar, Outlook |
-| `LocalConnector` | Local file/DB tail | seconds | iMessage, files |
-| `ImportConnector` | One-shot archive | manual | Discord, Instagram |
+| **Structured facts** | sender, timestamp, thread, labels, read state | SQL columns + indexes | Exact, filterable, sortable. A vector cannot answer "before Tuesday". |
+| **Extracted commitments** | "proposal due Friday 5pm" | SQL rows with a real `due_at` column | You need to *query by date*, sort by urgency, and mark done. |
+| **Prose** | "let's find a time to chat about the internship" | Vectors + FTS5 | Fuzzy recall. This is what embeddings are actually good at. |
 
-They share the normalisation and processing pipeline; only acquisition differs.
+### Why metadata must not be embedded
 
-### 1.2 "SQLite FTS5 + ChromaDB or Qdrant" needs care in a multi-worker app
+Embeddings destroy exactly the properties metadata is useful for:
 
-Qdrant in embedded mode (`QdrantClient(path=...)`, as Megamind uses) takes an
-exclusive lock on its directory. A FastAPI server plus separate worker
-processes all opening it will fail. Chroma's persistent client has the same
-issue.
+- **Dates blur.** "August 15" and "August 25" are near-identical vectors.
+  "Last Tuesday" has no stable representation at all. Any question with a time
+  bound — *most* questions about your own mail — degrades to guessing.
+- **Names collide.** "Sarah Chen" and "Sara Chen" and "Sarah Chan" sit almost
+  on top of each other. For a filter you need exact identity, not proximity.
+- **No aggregation.** "How many unread from my advisor this week" is a
+  `COUNT(*)` with a `WHERE`. Vector search cannot count, and top-k means it
+  cannot even see the whole set.
+- **Signal dilution.** Embedding `From: prof@uni.edu | Aug 12 | Subject: Re:` +
+  a 900-word quoted thread produces a vector dominated by boilerplate. The one
+  sentence that matters is averaged into noise.
 
-**Decision:** everything runs in **one process** with asyncio workers.
-Milestone 1 through 8 need no more than that — a personal mailbox is ~10⁵
-messages, not 10⁹. The vector store is behind a `VectorStore` interface so that
-moving to a Qdrant server (`docker compose up qdrant`) is a config change if
-the single-process model is ever outgrown. WAL mode is on so SQLite readers and
-writers don't block each other.
+So: **structured fields become indexed columns; only the cleaned prose body is
+embedded.**
 
-### 1.3 Embedding whole emails destroys retrieval quality
+### What is worth embedding
 
-Spec §6 says "implement embeddings for messages". Embedding an entire email as
-one vector fails on long threads: quoted history and signatures dominate the
-vector and the actual content gets averaged away.
+- The **cleaned body** — quoted replies, signatures, legal footers, and
+  tracking pixels stripped. Chunked, roughly a paragraph at a time.
+- **Calendar title + description**, so "the meeting about the budget" resolves.
+  The times and attendees stay in columns.
+- **Conversation sessions** for iMessage, not individual messages (see §5).
 
-**Decision:** chunk before embedding, and store chunks separately from
-messages. Megamind's `core/chunker.py` already solves this well — paragraph
-grouping with an elastic ceiling and sentence-boundary overlap — and it ports
-over nearly unchanged. Email needs one addition: strip quoted replies and
-signatures before chunking.
+### What is not worth embedding
 
-### 1.4 Prompt injection is under-specified as a prompt problem
+- **Anything under ~15 tokens.** "ok", "sounds good", "thanks" produce vectors
+  that match everything and mean nothing. They stay in SQL and FTS5.
+- **Automated mail.** Receipts, CI notifications, newsletters, no-reply alerts.
+  On a typical account this is 60–80% of volume, and embedding it is how
+  semantic search gets poisoned — you ask about a flight and get twelve
+  promotional fares. Classify first, embed selectively.
+- **Attachments**, until a milestone actually needs document search.
 
-Spec §15 asks the agent to "distinguish between USER INSTRUCTION and UNTRUSTED
-CONTENT". Doing that with prompt wording alone is not sufficient — a 12B local
-model is considerably easier to talk out of its instructions than a frontier
-model.
+The rule: *embed what you would recognise but could not quote.*
 
-**Decision:** three layers, with the load-bearing one being capabilities.
-1. Fenced, labelled untrusted blocks whose delimiters the content cannot forge.
+---
+
+## 2. Live-only ingestion
+
+No backfill. On connect, Gary records a watermark and only ingests what
+arrives after it.
+
+**What this buys:**
+
+- No multi-hour first sync, no pagination through 20,000 messages, no rate-limit
+  choreography, no "is it done yet" progress UI.
+- Every message can get the **full** treatment — clean, classify, extract,
+  embed — because the volume is ~50–100/day, not 20,000 at once.
+- No risk of a backfill triggering thousands of notifications.
+- The database stays small enough that SQLite and an embedded vector store are
+  comfortably the right tools.
+- Failure recovery is trivial: the watermark is the only state.
+
+**What it costs, stated plainly:**
+
+Gary is empty on day one and knows nothing about last month. "What did Professor
+Smith say about my project?" fails until Professor Smith emails you again. The
+system becomes useful over days, not minutes.
+
+**One mitigation, off by default.** A `seed_window_days` setting pulls a small
+recent window on first connect — 7 days is enough to make day one feel alive.
+This is a bootstrap, not a backlog: it is bounded, it runs once, and it is
+capped. Default `0` (pure live) per your call; set it to `7` if the empty first
+day bothers you.
+
+### Calendar is the exception, and it matters
+
+"From now on" is the wrong framing for a calendar. A calendar's value is in the
+**future** — the events you have not attended yet. Ingesting only "events
+created from now on" would miss the meeting scheduled last week for tomorrow,
+which is precisely the thing you want to ask about.
+
+So Calendar syncs a **window**, not a watermark:
+
+```
+[ now − 7 days ]  ──────────────►  [ now + 90 days ]
+   recent past                        the useful part
+```
+
+The small past window supports "when did I last meet Sarah?". Both bounds are
+settings. This is not a backlog — it is what a calendar *is*.
+
+### Per-source watermark mechanics
+
+| Source | Watermark | Incremental mechanism | Failure mode |
+|---|---|---|---|
+| Gmail | `historyId` from `users.getProfile` at connect | `users.history.list(startHistoryId=…)` | History IDs expire after ~7 days idle → 404. Fall back to `messages.list(q=after:<last_seen>)` to bridge the gap, then resume. |
+| Calendar | `syncToken` from the first windowed list | `events.list(syncToken=…)` | Token invalidated (410) → re-list the window, get a fresh token. |
+| iMessage | `MAX(ROWID)` in `chat.db` at connect | `WHERE ROWID > watermark` | Row IDs are monotonic; no expiry. Schema changes between macOS versions are the real risk. |
+
+### Polling, not Pub/Sub
+
+Gmail push requires a public HTTPS endpoint Google can reach. On a laptop
+behind NAT that means running a tunnel — real operational weight for a
+local-first app, and a dependency on a third party seeing your notification
+traffic.
+
+`users.history.list` against a watermark is one cheap call that returns nothing
+when idle. **Polling every 60s is the default.** Push stays available as an
+advanced option for anyone who already runs a tunnel. This is simpler, more
+private, and the latency difference is under a minute.
+
+---
+
+## 3. Three storage planes
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │  Gmail   ·   Calendar   ·   iMessage     │
+                    └────────────────────┬─────────────────────┘
+                                         │  live, past the watermark
+                    ┌────────────────────▼─────────────────────┐
+                    │  normalise → clean → classify → extract  │
+                    └────────────────────┬─────────────────────┘
+                                         │
+        ┌────────────────────────────────┼────────────────────────────────┐
+        │                                │                                │
+┌───────▼─────────┐            ┌─────────▼────────┐            ┌──────────▼────────┐
+│ FACTS           │            │ COMMITMENTS      │            │ SEMANTIC          │
+│ SQL + indexes   │            │ SQL + indexes    │            │ vectors + FTS5    │
+│                 │            │                  │            │                   │
+│ messages        │            │ commitments      │            │ chunks            │
+│ threads         │            │  due_at ────────►│            │ embeddings        │
+│ contacts        │            │  owner           │            │ messages_fts      │
+│ calendar_events │            │  status          │            │                   │
+│ attachments     │            │  evidence_quote  │            │ cleaned prose     │
+│                 │            │  source_message  │            │ only              │
+└───────┬─────────┘            └─────────┬────────┘            └──────────┬────────┘
+        │                                │                                │
+        └────────────────────────────────┼────────────────────────────────┘
+                                         │
+                          ┌──────────────▼───────────────┐
+                          │  query router picks a plane  │
+                          └──────────────┬───────────────┘
+                                         │
+                              typed, read-only agent tools
+```
+
+The router is the precision win. Most questions about your own data are **not**
+semantic:
+
+| Question | Plane | Actual operation |
+|---|---|---|
+| "What do I have tomorrow?" | facts | `calendar_events WHERE starts_at::date = ?` |
+| "What's due this week?" | commitments | `WHERE due_at BETWEEN ? AND ? AND status='open'` |
+| "Who haven't I replied to?" | facts | threads where last message `is_from_me = false` |
+| "What did Prof Smith send last week?" | facts | `WHERE sender_contact_id = ? AND timestamp > ?` |
+| "Find the email about the interview" | semantic | vector + FTS5 hybrid |
+| "Catch me up" | composite | several structured queries, then summarise |
+
+Only one of those is a vector search. A design that routes everything through
+embeddings gets five of the six wrong, which is why "semantic search over my
+email" products feel unreliable.
+
+**Filter before you search, never after.** "Emails from Sarah last month about
+the lease" applies `sender` and date as *payload filters inside* the vector
+query. Searching first and filtering the top-k afterwards throws away recall —
+if Sarah's email ranked 40th globally, post-filtering never sees it.
+
+---
+
+## 4. Tracking tasks and deadlines
+
+This is the part that does not work without structure, and it is the direct
+answer to "if it's a Gmail with a task and a deadline, how will we track that?"
+
+### The pipeline, per message
+
+```
+raw message
+   ↓  normalise           → common schema regardless of source
+   ↓  clean               → strip quoted replies, signatures, footers, trackers
+   ↓  classify            → category, importance, is_automated   [fast model]
+   ↓  extract             → commitments, with evidence + dates    [fast model]
+   ↓  validate            → grounding + date sanity              [pure code]
+   ↓  reconcile           → against open items in the same thread
+   ↓  persist             → structured rows
+   ↓  embed               → cleaned prose only, if worth it
+```
+
+Classification and extraction are one call with a strict JSON schema
+(`MessageAnalysis` in `backend/pipeline/schemas.py`), passed to Ollama's
+`format=` structured-output parameter and run on the **fast** model.
+
+### Deadlines become real columns
+
+```sql
+commitments (
+  id, source_message_id, thread_id,
+  kind,             -- task | deadline | meeting_request | question | promise
+  title,
+  owner,            -- me | them | unclear
+  due_at,           -- TIMESTAMP, INDEXED  ← the whole point
+  due_precision,    -- exact | day | week | month | vague | none
+  status,           -- open | done | cancelled | snoozed | dismissed
+  confidence,
+  evidence_quote,   -- verbatim span from the source
+  created_at, updated_at
+)
+CREATE INDEX ON commitments (status, due_at);
+CREATE INDEX ON commitments (thread_id);
+```
+
+`due_at` being an indexed timestamp is what makes "what's due this week" a
+range scan rather than a hopeful search. `due_precision` keeps the UI honest:
+"sometime next week" and "Friday 5pm" both produce a timestamp, but only one
+should drive an alarm.
+
+`owner` splits the two questions people actually have:
+
+- *What do I owe?* → `owner = 'me' AND status = 'open'`
+- *What am I waiting on?* → `owner = 'them' AND status = 'open'`
+
+"Can you send the report by Friday?" is mine. "I'll send the report by Friday"
+is theirs. Same sentence shape, opposite meaning, and the difference is the
+entire value of a follow-up feature.
+
+### Three failure modes, and the defences
+
+**1. The model invents a deadline.** Every commitment must carry a verbatim
+`evidence_quote`, and `verify_grounding()` checks the quote actually appears in
+the message — normalised for whitespace, case, and smart quotes, with a token
+overlap fallback for minor rewording. Ungrounded extractions are discarded
+before they reach the database. A quote shorter than three tokens is rejected
+outright: `"due"` is a substring of half the emails ever written and verifies
+nothing.
+
+**2. Relative dates resolve wrong.** "by Friday" means nothing without an
+anchor. The extractor gets the *message's own timestamp* and the user's
+timezone, and returns absolute ISO-8601. `check_due_date()` then rejects
+anything before the message was sent (with a few hours of grace for timezone
+skew) or implausibly far out. A rejected date does not discard the task — it
+keeps the task and drops the date, because a wrong deadline is worse than no
+deadline.
+
+**3. Threads produce duplicates.** A five-reply thread about one deadline must
+not create five tasks, and "actually, let's move it to Monday" must move the
+existing task rather than create a second one.
+
+The fix is **thread-aware extraction**: when a message arrives in a thread with
+open commitments, those commitments are included in the extractor's input, and
+it can return `updates` (change the due date, mark done, cancel) as well as new
+items. Reconciliation happens against a known set instead of by guessing at
+similarity after the fact.
+
+```
+EXISTING OPEN ITEMS IN THIS THREAD:
+  [c_7f2a] "Submit research proposal" due 2026-08-15T17:00Z
+
+NEW MESSAGE:
+  "Let's push the proposal to Monday the 18th."
+
+→ updates: [{commitment_id: "c_7f2a", new_due_at: "2026-08-18T17:00Z",
+             evidence_quote: "push the proposal to Monday the 18th"}]
+```
+
+**4. Calendar events are not extracted.** They already have structured start
+and end times. Extracting a deadline from "Meeting: Thursday 2pm" would create
+a worse duplicate of a fact you already hold. Calendar events link to
+commitments; they do not generate them.
+
+### The user stays in control
+
+Extraction is a suggestion, not a verdict. Every commitment can be marked done,
+snoozed, or **dismissed** — and a dismissal is remembered, so the same email
+does not resurrect the task on the next reconciliation pass. `confidence` below
+a threshold surfaces as "possible task" rather than a bare assertion.
+
+---
+
+## 5. iMessage needs different treatment
+
+Applying the email pipeline to iMessage produces noise. The characteristics are
+genuinely different:
+
+| | Email | iMessage |
+|---|---|---|
+| Length | paragraphs | a few words |
+| Volume | ~50/day | ~500/day |
+| Unit of meaning | one message | a burst of messages |
+| Structure | subject, thread, formal | none |
+| Timing | hours apart | seconds apart |
+
+**The unit of meaning is a session, not a message.** "friday works" is
+meaningless alone; it means something only alongside the three messages before
+it. So iMessage is grouped into **sessions** — consecutive messages in one
+conversation with no gap longer than ~30 minutes — and the *session* is what
+gets summarised, embedded, and extracted from.
+
+This also fixes the volume problem: 500 messages a day becomes maybe 20
+sessions, which is a sane amount of LLM work.
+
+Individual messages still land in the facts plane with full fidelity, so
+`is_from_me`, timestamps, and per-message search all work exactly as expected.
+
+**Access:** `~/Library/Messages/chat.db` is your own SQLite database on your own
+Mac. Gary opens an **immutable read-only copy**, never the live file, so it
+cannot corrupt or lock what Messages.app is using. Requires Full Disk Access
+that you grant, macOS only, this machine's history only. Timestamps are Apple
+epoch (nanoseconds since 2001-01-01) and need conversion.
+
+---
+
+## 6. Revised database schema
+
+Milestone 1 shipped `conversations`, `chat_turns`, `sources`, `app_settings`.
+The rest arrives with the code that fills it.
+
+```
+FACTS
+  contacts          id, display_name, emails[], handles[], first_seen, last_seen
+  message_threads   id, source_id, source_thread_id, subject, participants[],
+                    last_message_at, last_message_from_me, message_count
+  messages          id, source_id, source_message_id UNIQUE, thread_id,
+                    sender_contact_id, recipients[], subject,
+                    body_clean, body_raw, timestamp, labels[],
+                    is_read, is_from_me, session_id, metadata
+  attachments       id, message_id, filename, mime_type, size_bytes, local_path
+  calendar_events   id, source_id, source_event_id UNIQUE, title, description,
+                    location, starts_at, ends_at, all_day, recurrence,
+                    attendees[], organizer, status
+  sessions          id, source_id, thread_id, started_at, ended_at,
+                    message_count, summary          -- iMessage grouping
+
+DERIVED
+  message_analysis  message_id, category, importance, requires_action,
+                    is_automated, summary, people[], model, created_at
+  commitments       (see §4)
+  dismissals        commitment_fingerprint, dismissed_at   -- do not resurrect
+
+SEMANTIC
+  chunks            id, message_id | session_id | event_id, chunk_index,
+                    text, token_count
+  embeddings        chunk_id, vector, model, dim, created_at
+  messages_fts      FTS5 virtual table over (subject, body_clean)
+
+OPERATIONS
+  sync_state        source_id, watermark, last_sync_at, last_error, consecutive_failures
+  jobs              id, type, payload, status, attempts, last_error,
+                    scheduled_for, idempotency_key
+  notifications     id, kind, title, body, importance, commitment_id,
+                    created_at, seen_at, dismissed_at
+  memories          id, content, kind(user|derived), source_ref,
+                    confirmed_by_user, created_at
+  agent_runs        id, conversation_id, question, tools_called, sources_used,
+                    duration_ms, model, created_at
+```
+
+Indexes that matter:
+
+```sql
+messages (timestamp DESC)                    -- "what came in today"
+messages (sender_contact_id, timestamp)      -- "what did Sarah send"
+messages (thread_id, timestamp)
+messages (source_id, source_message_id)      -- UNIQUE: idempotent ingest
+calendar_events (starts_at)                  -- "what's tomorrow"
+commitments (status, due_at)                 -- "what's due this week"
+commitments (owner, status)                  -- "what am I waiting on"
+message_analysis (importance DESC)
+threads (last_message_at, last_message_from_me)  -- "who am I ignoring"
+```
+
+`messages(source_id, source_message_id)` being UNIQUE is what makes ingestion
+idempotent: replaying a sync is a no-op, which is the spec's §18 requirement
+and the thing that makes crash recovery boring.
+
+---
+
+## 7. Retrieval
+
+Hybrid, but only when the question is actually semantic.
+
+```
+route(question)
+  ├─ structured  → typed SQL tool, exact filters, done
+  ├─ semantic    → filter-then-search, hybrid fusion
+  └─ composite   → several structured queries, then summarise
+```
+
+For the semantic path:
+
+```
+score = w_keyword   · BM25(q, chunk)        exact terms, names, invoice numbers
+      + w_semantic  · cos(q, chunk)         paraphrase and description
+      + w_recency   · decay(age)            last week usually beats last year
+      + w_important · importance(msg)       actionable outranks newsletters
+```
+
+Reciprocal Rank Fusion across the BM25 and dense result sets, then re-rank by
+recency and importance. All four weights are settings.
+
+Keyword alone fails on "the email about scheduling an interview" when the mail
+says "let's find a time to chat". Vector alone fails on "invoice 4417". Both
+are needed — which is why the spec's "do not rely exclusively on vector search"
+is right.
+
+Every chunk carries `message_id` through to the answer, so citations point at a
+stored message you can open, not at the model's recollection.
+
+---
+
+## 8. Problems found in the original spec
+
+Kept from revision 1; the connector analysis is unchanged and still governs.
+
+### 8.1 Two requested connectors cannot be built as described
+
+The request named Gmail, iMessage, Instagram DMs, and Discord DMs. §2 of the
+spec also says never to scrape where an official API exists and never to bypass
+platform restrictions. Those conflict for half the list:
+
+- **Discord DMs** — the bot API has no access to a user's private DMs. The only
+  live path is a self-bot on a user token, against ToS and enforced with
+  account termination.
+- **Instagram DMs** — the Messaging API is a customer-service product for
+  Business/Creator accounts, requires app review, and does not expose personal
+  DM history.
+
+Both offer official **data exports**, which is the legitimate path — a periodic
+snapshot, not a live feed. Out of scope for this phase either way.
+
+- **iMessage** — the spec is too pessimistic. Reading your own local database
+  with access you grant is not an auth bypass. See §5.
+
+### 8.2 Embedded vector stores lock their directory
+
+`QdrantClient(path=…)` takes an exclusive lock; a server plus separate worker
+processes cannot both open it. **Everything runs in one process with asyncio
+workers.** With live-only ingestion the volume makes this comfortable for
+years. The `VectorStore` interface keeps a Qdrant server one config change
+away.
+
+### 8.3 Prompt injection is not a prompt problem
+
+A 12B local model is much easier to talk out of its instructions than a
+frontier model. Three layers, and the load-bearing one is not the prompt:
+
+1. Fenced untrusted blocks whose delimiters content cannot forge.
 2. System-prompt trust rules.
 3. **No dangerous tools exist to hijack.** A successful injection can make the
    model say something wrong; it cannot make it send mail, because there is no
    send tool and the capability check would reject one.
 
-This is why `permissions.py` and `prompt_guard.py` are in Milestone 1, before
-any external data can arrive, rather than bolted on at Milestone 5.
+This is why `permissions.py` and `prompt_guard.py` shipped in Milestone 1.
 
-### 1.5 The importance classifier will spam you
+### 8.4 Notification spam
 
-Spec §10 wants an LLM importance score on every message; §11 wants
-notifications above a threshold. Run naively, the first Gmail sync classifies
-20,000 historical emails — hours of GPU time — and then notifies on the
-backlog.
+Live-only ingestion removes the backfill-storm risk entirely. The remaining
+guards: require importance above threshold **and** `requires_action`; suppress
+anything `is_automated`; hard rate limit per hour; quiet hours.
 
-**Decision:** classify only messages newer than the sync watermark; never
-notify during a backfill; rate-limit notifications per hour; and require both a
-score above threshold *and* `requires_action` before notifying.
+### 8.5 `gemma4:26b` may not exist under that tag
 
-### 1.6 `gemma4:26b` may not be a real tag
+Unverified. Since nothing hard-codes a model name this resolves itself:
+defaults ship as `gemma3:27b`/`gemma3:12b`, and the settings page prints the
+exact `ollama pull` command when a configured tag is not installed.
 
-The spec names Gemma 4 26B/12B. Those tags may not exist in Ollama's registry
-under that name. Since the spec also (correctly) requires no hard-coded model
-names, this resolves itself: the defaults ship as `gemma3:27b`/`gemma3:12b`,
-`start.sh` warns when the configured tag is not installed, and the status page
-prints the exact `ollama pull` command. Set it to whatever `ollama list` shows.
+### 8.6 "Desktop app" vs. React + Vite
 
-### 1.7 "Desktop app" vs. the specified stack
-
-The request opens with "desktop app"; §1 specifies React + Vite, which is a web
-app. Milestone 1 ships the web UI bound to localhost. A Tauri wrapper (~200
-lines, reuses the same frontend build, gives a real `.app` and a menu-bar icon)
-is the right way to make it a genuine desktop app, and is worth doing once the
-connectors work.
+Milestone 1 ships the web UI on localhost. A Tauri wrapper reuses the same
+frontend build and gives a real `.app` — worth doing once the connectors work.
 
 ---
 
-## 2. Final architecture
-
-```
-                        ┌──────────────────────────────────────┐
- EXTERNAL               │  Gmail   Calendar   iMessage   files │
-                        └───────────────────┬──────────────────┘
-                                            │
- ACQUISITION            Push │ Poll │ Local │ Import   ← 4 connector classes
-                                            │
- NORMALISATION          ┌───────────────────▼──────────────────┐
-                        │  Message / CalendarEvent / Contact   │
-                        │  one schema regardless of source     │
-                        └───────────────────┬──────────────────┘
-                                            │
- EVENT BUS              ──── AgentEvent ────┼──── fan-out to workers
-                                            │
- STORAGE                ┌───────────────────▼──────────────────┐
-                        │ SQLite (WAL)  ·  FTS5  ·  vectors    │
-                        └───────────────────┬──────────────────┘
-                                            │
- RETRIEVAL              ┌───────────────────▼──────────────────┐
-                        │ hybrid: BM25 + dense + recency +     │
-                        │ importance, fused by RRF             │
-                        └───────────────────┬──────────────────┘
-                                            │
- TRUST BOUNDARY         ─── fence untrusted content ───────────
-                                            │
- INFERENCE              ┌───────────────────▼──────────────────┐
-                        │ LLMProvider → Ollama (local or LAN)  │
-                        │ roles: large / fast / router / embed │
-                        └───────────────────┬──────────────────┘
-                                            │
- AGENT                  ┌───────────────────▼──────────────────┐
-                        │ read-only tools, capability-checked  │
-                        └───────────────────┬──────────────────┘
-                                            │
- SURFACE                     Chat UI  ·  Notifications  ·  Status
-```
-
-### Key seams
-
-**`LLMProvider`** (`backend/llm/base.py`) — the only place that knows how to
-talk to an inference backend. `OllamaProvider` uses raw httpx rather than the
-`ollama` SDK specifically because the SDK reads a process-global `OLLAMA_HOST`,
-which makes per-role base URLs impossible.
-
-**`LLMRegistry`** (`backend/llm/registry.py`) — maps a *role* to a concrete
-(provider, model, context window). Callers ask for "the fast model", never a
-model name. This is what makes spec §25 a config change.
-
-**`EventBus`** (`backend/events/bus.py`) — connectors publish, workers
-subscribe. Subscribers have bounded queues and are dropped-oldest, so a stalled
-WebSocket client cannot back-pressure ingestion.
-
-**`prompt_guard`** — the only sanctioned path for external text into a prompt.
-
----
-
-## 3. Reused from Megamind
+## 9. Reused from Megamind
 
 [Dev05d/Megamind](https://github.com/Dev05d/Megamind) already solved several of
-these problems well. What carries over:
+these well.
 
 | Megamind | Here | Change |
 |---|---|---|
-| `core/memory_manager.py` | `backend/llm/context_budget.py` | **Ported.** Cascading eviction — retrieved chunks first, then whole conversation turns — plus exact token counts from Ollama's `/api/tokenize` with a chars/4 fallback. Made async; returns a result object instead of printing. |
-| `core/chunker.py` | M3 `backend/embeddings/chunker.py` | **Port nearly as-is.** Elastic paragraph chunking with sentence-boundary overlap is exactly right for email bodies. Needs quoted-reply stripping added. |
-| `core/vector_store.py` | M3 `backend/embeddings/store.py` | **Adapt.** The dense+sparse hybrid with RRF fusion is the right retrieval design. Change: embedded Qdrant → single-process ownership (see §1.2), and `uuid5(source_i)` point IDs → stable content-hash IDs so re-ingesting a modified email updates rather than duplicates. |
-| `core/router.py` | M5 `backend/agent/planner.py` | **Adapt.** Pydantic `format=` schema for structured output on a small model is the right technique, and the `needs_novel_retrieval` route (excluding already-seen chunk IDs) is a genuinely good idea worth keeping. |
+| `core/memory_manager.py` | `backend/llm/context_budget.py` | **Ported.** Cascading eviction, exact token counts from `/api/tokenize` with a chars/4 fallback. Made async; returns a result object instead of printing. |
+| `core/chunker.py` | M3 `backend/pipeline/chunker.py` | **Port nearly as-is.** Elastic paragraph chunking with sentence-boundary overlap is right for email bodies. Add quoted-reply and signature stripping first. |
+| `core/vector_store.py` | M3 `backend/embeddings/store.py` | **Adapt.** Dense+sparse hybrid with RRF is the right retrieval design. Changes: single-process ownership (§8.2); content-hash point IDs instead of `uuid5(source_i)` so a re-ingested message updates rather than duplicates; **payload filters applied inside the query** so structured constraints do not lose recall. |
+| `core/router.py` | M5 `backend/agent/router.py` | **Adapt and expand.** Pydantic `format=` structured output on a small model is the right technique. Expanded from "retrieve or not" to "which storage plane" (§3). The `needs_novel_retrieval` route excluding already-seen chunk IDs is a good idea worth keeping. |
 | `core/config.py` | `backend/config.py` | **Superseded** by pydantic-settings, but the `OLLAMA_HOST` indirection was already there and is why remote inference was cheap to support. |
 
-What does not carry over: the `input()`-driven CLI loop, the global mutable
-client singletons, and printing to stdout from library code.
+Not carried over: the `input()` CLI loop, global mutable client singletons, and
+printing to stdout from library code.
 
-One thing worth fixing in Megamind itself: **`.env` is committed to that repo.**
-Even with only model names in it today, it is the file that will eventually hold
-an API key. Add it to `.gitignore` and commit a `.env.example` instead.
-
----
-
-## 4. Target database schema (M2–M8)
-
-Milestone 1 ships `conversations`, `chat_turns`, `sources`, `app_settings`.
-The rest arrive with the code that fills them.
-
-```
-sources           id, kind, account_identifier, status, sync_cursor, config
-contacts          id, display_name, emails[], handles[], first_seen, last_seen
-message_threads   id, source_id, source_thread_id, subject, participants[],
-                  last_message_at, message_count
-messages          id, source_id, source_message_id, thread_id, sender_contact_id,
-                  recipients[], subject, body_text, body_html_sanitized,
-                  timestamp, labels[], is_read, is_from_me, metadata
-attachments       id, message_id, filename, mime_type, size_bytes, local_path
-calendar_events   id, source_id, source_event_id, title, description, location,
-                  starts_at, ends_at, all_day, recurrence, attendees[], status
-derived_metadata  message_id, importance, requires_action, category, deadline,
-                  summary, people[], suggested_action, model, created_at
-chunks            id, message_id, chunk_index, text, token_count
-embeddings        chunk_id, vector, model, dim, created_at
-memories          id, content, kind(user|derived), source_ref, created_at,
-                  confirmed_by_user
-notifications     id, kind, title, body, importance, message_ref, created_at,
-                  seen_at, dismissed_at
-jobs              id, type, payload, status, attempts, last_error,
-                  scheduled_for, idempotency_key
-agent_runs        id, conversation_id, question, tools_called, sources_used,
-                  duration_ms, model, created_at
-```
-
-Indexes: `messages(timestamp)`, `messages(thread_id)`, `messages(sender_contact_id)`,
-`messages(source_id, source_message_id)` unique, `calendar_events(starts_at)`,
-`derived_metadata(importance)`, `derived_metadata(deadline)`, `jobs(status, scheduled_for)`.
-
-FTS5 virtual table over `messages(subject, body_text)`, synced by trigger.
-
-`messages.source_message_id` unique per source is what makes ingestion
-idempotent — the requirement in spec §18 that re-running a sync must not
-duplicate anything.
+Worth fixing in Megamind itself: **`.env` is committed to that repo.** Only
+model names today, but it is the file that will eventually hold a key.
 
 ---
 
-## 5. Retrieval design (M3)
+## 10. Revised milestones
 
-Four signals, fused rather than picked:
+| # | Milestone | Contents |
+|---|---|---|
+| 1 | Foundation ✅ | FastAPI + SQLite + Ollama + chat UI + settings |
+| 2 | Facts plane | Gmail OAuth, live watermark, polling, normalise + store. "What came in today?" |
+| 3 | Commitments plane | Clean, classify, extract, ground, reconcile. "What's due this week?" |
+| 4 | Semantic plane | FTS5 + chunking + embeddings + hybrid retrieval |
+| 5 | Agent | Query router + typed read-only tools over all three planes |
+| 6 | Calendar | Windowed sync, link events to commitments |
+| 7 | iMessage | Local read-only connector, session grouping |
+| 8 | Proactive | Notifications and the daily briefing |
 
-```
-score = w_bm25 · BM25(q, d)          keyword — for names, IDs, exact phrases
-      + w_dense · cos(q, d)          semantic — for "that interview email"
-      + w_recent · decay(age)        recency  — last week usually beats last year
-      + w_import · importance(d)     salience — flagged/actionable ranks up
-```
-
-Reciprocal Rank Fusion over the BM25 and dense result sets (Megamind's
-approach), then re-rank by the recency and importance terms. Weights are
-configurable.
-
-Keyword search alone fails on "the email about scheduling an interview" when
-the mail says "let's find a time to chat". Vector search alone fails on
-"invoice 4417". Both are needed, which is why the spec's "do not rely
-exclusively on vector search" is correct.
-
-Every retrieved chunk carries `message_id` through to the answer, which is what
-makes citations real rather than the model's recollection of a source.
+Milestone 2 is deliberately boring: get real mail into real rows, correctly and
+idempotently, with no LLM in the path. Everything else stacks on that being
+right.
 
 ---
 
-## 6. Threat model
+## 11. Threat model
 
 | Threat | Mitigation |
 |---|---|
 | Injected instructions in an email | Fenced untrusted blocks; forgery-proof delimiters; no write tools exist |
+| Fabricated deadlines and tasks | Verbatim evidence quotes verified against the source; date sanity checks |
 | Exfiltration via a tool | Read-only capabilities; no network-egress tool |
-| Malicious HTML/CSS in mail | Sanitize on ingest; store text separately; no remote resource loading in the UI |
+| Malicious HTML/CSS in mail | Sanitised on ingest; text stored separately; no remote resource loading in the UI |
 | LAN attacker reaching the API | Loopback bind by default; refuses non-loopback without a token |
-| OAuth token theft from the browser | Tokens never leave the backend; UI never sees them |
+| OAuth token theft from the browser | Tokens never leave the backend |
 | Token theft from disk | Encrypted at rest with `CREDENTIAL_ENCRYPTION_KEY` |
+| Corrupting the live iMessage DB | Immutable read-only copy, never the live file |
 | Accidental secret commit | `.env` gitignored; `.env.example` carries no values |
-| Data leaving the machine | Ollama only; no cloud provider implemented |
 
-Assumption: the machine itself and its user are trusted. Gary does not defend
-against someone with local root or physical disk access.
+Assumption: the machine and its user are trusted. Gary does not defend against
+local root or physical disk access.

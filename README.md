@@ -226,7 +226,7 @@ notifications, and the daily briefing. See the roadmap below.
 ## Testing it
 
 ```bash
-.venv/bin/python -m pytest              # 130 tests, no Ollama or accounts needed
+.venv/bin/python -m pytest              # 156 tests, no Ollama or accounts needed
 ```
 
 Manual smoke test:
@@ -254,19 +254,33 @@ In the UI, check that:
 
 ## Roadmap
 
-| # | Milestone | Status |
-|---|---|---|
-| 1 | FastAPI + SQLite + Ollama + chat UI | **done** |
-| 2 | Gmail OAuth + initial sync | next |
-| 3 | FTS5 + embeddings + hybrid retrieval | |
-| 4 | Gmail push notifications / live ingestion | |
-| 5 | Agent tool loop | |
-| 6 | Importance classification + notifications | |
-| 7 | Google Calendar | |
-| 8 | Daily briefing | |
-| 9 | Additional connectors | |
+| # | Milestone | Contents | Status |
+|---|---|---|---|
+| 1 | Foundation | FastAPI + SQLite + Ollama + chat UI + settings | **done** |
+| 2 | Facts plane | Gmail OAuth, live watermark, polling, normalise + store | next |
+| 3 | Commitments plane | Classify, extract tasks/deadlines, ground, reconcile | |
+| 4 | Semantic plane | FTS5 + chunking + embeddings + hybrid retrieval | |
+| 5 | Agent | Query router + typed read-only tools over all three planes | |
+| 6 | Calendar | Windowed sync, link events to commitments | |
+| 7 | iMessage | Local read-only connector, session grouping | |
+| 8 | Proactive | Notifications and the daily briefing | |
+
+**Ingestion is live-only.** Gary records a watermark when you connect an account
+and stores what arrives after it — no historical backfill. That keeps the first
+sync instant and lets every message get full processing, at the cost of an empty
+day one. A bounded `seed_window_days` setting pulls one recent week if you'd
+rather not start from nothing.
+
+Calendar is the deliberate exception: it syncs a *window* (7 days back, 90
+forward) because a calendar's value is in the future, and tomorrow's meeting was
+created last week.
 
 ---
+
+## Scope
+
+The next phase covers **Gmail, Google Calendar, and iMessage** only. Discord and
+Instagram are deferred — see below for why they are a different kind of problem.
 
 ## A note on the connectors you asked for
 
@@ -320,7 +334,7 @@ backend/
   config.py     all configuration, one place
   main.py       app factory
 frontend/       React + Vite + TypeScript
-tests/          130 tests, mock connectors, no live accounts required
+tests/          156 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 

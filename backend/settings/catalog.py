@@ -86,8 +86,9 @@ CATEGORIES: List[Category] = [
     Category(
         "sync",
         "Sync & ingestion",
-        "How often Gary checks your accounts for new data, and how far back the "
-        "first import reaches.",
+        "How often Gary checks your accounts. Ingestion is live-only: a "
+        "watermark is set when you connect an account and only what arrives "
+        "after it is stored. Nothing historical is imported.",
     ),
     Category(
         "notifications",
@@ -547,50 +548,57 @@ CATALOG: List[SettingDef] = [
     # ------------------------------------------------------------------ sync
     SettingDef(
         key="gmail_poll_interval_seconds",
-        label="Gmail poll interval",
+        label="Gmail check interval",
         description=(
-            "Fallback polling frequency. When push notifications are configured "
-            "Gary learns about mail within seconds and this is only a safety net "
-            "for missed pushes — push delivery is best-effort, not guaranteed."
+            "How often to ask Gmail what has changed since the last check.\n\n"
+            "This is one cheap API call against a watermark that returns nothing "
+            "when your inbox is idle, so a short interval costs almost nothing. "
+            "Gary polls rather than using Gmail push because push requires a "
+            "public HTTPS endpoint Google can reach — which on a laptop means "
+            "running a tunnel and letting a third party see your notification "
+            "traffic. Polling is simpler, more private, and under a minute behind."
         ),
         category="sync",
         type="int",
-        minimum=30,
-        maximum=86400,
-        step=30,
+        minimum=15,
+        maximum=3600,
+        step=15,
         unit="seconds",
         milestone=2,
         active=False,
     ),
     SettingDef(
-        key="gmail_backfill_days",
-        label="Initial history depth",
+        key="seed_window_days",
+        label="Initial seed window",
         description=(
-            "How far back the first sync reaches. Deeper means more to search but "
-            "a much longer first import and more disk. Start modest — you can "
-            "always backfill further later."
+            "Gary is live-only: it records a watermark when you connect an "
+            "account and ingests what arrives after it. Nothing historical.\n\n"
+            "That means day one is empty, and questions about last month have no "
+            "answer until those conversations happen again. Setting this to 7 "
+            "pulls one recent week on first connect so the app is useful "
+            "immediately. It runs once, is capped by the setting below, and is "
+            "not a backlog import. 0 disables it entirely."
         ),
         category="sync",
         type="int",
-        minimum=1,
-        maximum=7300,
-        step=30,
+        minimum=0,
+        maximum=90,
         unit="days",
         milestone=2,
         active=False,
     ),
     SettingDef(
-        key="gmail_max_backfill_messages",
-        label="Backfill message cap",
+        key="seed_max_messages",
+        label="Seed message cap",
         description=(
-            "Hard ceiling on the initial import, as a guard against accidentally "
-            "ingesting a decade of mailing lists on the first run."
+            "Hard ceiling on the one-off seed, so a busy week cannot turn a "
+            "bootstrap into a multi-hour import."
         ),
         category="sync",
         type="int",
-        minimum=100,
-        maximum=1000000,
-        step=100,
+        minimum=0,
+        maximum=5000,
+        step=50,
         unit="messages",
         milestone=2,
         active=False,
@@ -598,45 +606,110 @@ CATALOG: List[SettingDef] = [
     ),
     SettingDef(
         key="calendar_poll_interval_seconds",
-        label="Calendar poll interval",
-        description="How often to check Google Calendar for changes.",
-        category="sync",
-        type="int",
-        minimum=60,
-        maximum=86400,
-        step=60,
-        unit="seconds",
-        milestone=7,
-        active=False,
-    ),
-    SettingDef(
-        key="calendar_past_days",
-        label="Calendar history window",
+        label="Calendar check interval",
         description=(
-            "How far back to import past events. Past events are what let Gary "
-            "answer questions like 'when did I last meet Sarah?'."
+            "How often to check Google Calendar for changes, using a sync token "
+            "so only what actually changed comes back."
         ),
         category="sync",
         type="int",
-        minimum=0,
-        maximum=3650,
+        minimum=30,
+        maximum=86400,
         step=30,
-        unit="days",
-        milestone=7,
+        unit="seconds",
+        milestone=6,
         active=False,
     ),
     SettingDef(
         key="calendar_future_days",
         label="Calendar look-ahead",
-        description="How far forward to import upcoming events.",
+        description=(
+            "How far forward to sync events.\n\n"
+            "Calendar is the one source where 'only new things from now on' is "
+            "the wrong rule: a calendar's value is in the future, and tomorrow's "
+            "meeting was probably created last week. So Gary syncs a window "
+            "rather than a watermark, and this is its forward edge."
+        ),
         category="sync",
         type="int",
         minimum=1,
-        maximum=3650,
-        step=30,
+        maximum=730,
+        step=7,
         unit="days",
+        milestone=6,
+        active=False,
+    ),
+    SettingDef(
+        key="calendar_past_days",
+        label="Calendar look-back",
+        description=(
+            "How far back to sync past events. A small window is enough to "
+            "answer 'when did I last meet Sarah?' without importing years."
+        ),
+        category="sync",
+        type="int",
+        minimum=0,
+        maximum=365,
+        step=7,
+        unit="days",
+        milestone=6,
+        active=False,
+    ),
+    SettingDef(
+        key="imessage_poll_interval_seconds",
+        label="iMessage check interval",
+        description=(
+            "How often to read new rows from the local Messages database. This "
+            "is a local file read against a row-ID watermark, so it is cheap and "
+            "can be frequent."
+        ),
+        category="sync",
+        type="int",
+        minimum=5,
+        maximum=3600,
+        step=5,
+        unit="seconds",
         milestone=7,
         active=False,
+    ),
+    SettingDef(
+        key="imessage_session_gap_minutes",
+        label="Message session gap",
+        description=(
+            "Consecutive messages in one chat closer together than this are "
+            "treated as a single conversation session.\n\n"
+            "Sessions, not individual messages, are what get summarised and "
+            "embedded. A text saying 'friday works' means nothing on its own — "
+            "it means something alongside the three messages before it. "
+            "Grouping also keeps 500 messages a day down to roughly 20 units of "
+            "work rather than 500."
+        ),
+        category="sync",
+        type="int",
+        minimum=1,
+        maximum=1440,
+        step=5,
+        unit="minutes",
+        milestone=7,
+        active=False,
+    ),
+    SettingDef(
+        key="user_timezone",
+        label="Your timezone",
+        description=(
+            "IANA timezone name, used to turn relative deadlines into real "
+            "dates.\n\n"
+            "'The report is due Friday' has no meaning without knowing when the "
+            "message was sent and where you are. Extraction anchors relative "
+            "dates to the message's own timestamp in this zone. Getting it wrong "
+            "shifts every extracted deadline."
+        ),
+        category="sync",
+        type="string",
+        placeholder="America/New_York",
+        milestone=3,
+        active=False,
+        examples=["UTC", "America/New_York", "America/Los_Angeles", "Europe/London"],
     ),
     # --------------------------------------------------------- notifications
     SettingDef(
