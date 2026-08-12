@@ -842,6 +842,102 @@ CATALOG: List[SettingDef] = [
         advanced=True,
     ),
     SettingDef(
+        key="image_embedding_enabled",
+        label="Understand images",
+        description=(
+            "Index photos so you can find them by describing them — 'the photo "
+            "of the whiteboard', 'the receipt from the restaurant'.\n\n"
+            "Images are routed rather than uniformly processed: photographs get "
+            "a visual embedding, while screenshots and scans go to text "
+            "recognition instead, because an image embedding captures that "
+            "something IS a screenshot but not what it says."
+        ),
+        category="storage",
+        type="bool",
+        milestone=3,
+        active=False,
+    ),
+    SettingDef(
+        key="image_embedding_model",
+        label="Image model",
+        description=(
+            "Vision model used to encode photos. CLIP ViT-B/32 is the "
+            "well-understood default at 512 dimensions — about 2KB per image.\n\n"
+            "Note this model's vectors live in their own space and cannot be "
+            "compared with text embeddings, so images use a separate index and "
+            "your query is encoded twice. Results from both are merged by rank, "
+            "which works fine across incompatible score scales."
+        ),
+        category="storage",
+        type="string",
+        milestone=3,
+        active=False,
+        advanced=True,
+        examples=["clip-ViT-B-32", "clip-ViT-L-14", "nomic-embed-vision-v1.5"],
+        warning="Changing this invalidates every existing image vector.",
+    ),
+    SettingDef(
+        key="image_embed_imessage",
+        label="Index iMessage photos",
+        description=(
+            "Include photos sent and received in Messages. This is where most "
+            "personal photos actually are, and the highest-value source for "
+            "'find that picture Sarah sent'. Also the highest volume."
+        ),
+        category="storage",
+        type="bool",
+        milestone=7,
+        active=False,
+    ),
+    SettingDef(
+        key="image_embed_inline_email",
+        label="Index inline email images",
+        description=(
+            "Images embedded in message bodies rather than attached.\n\n"
+            "Off by default and worth leaving off: these are logos, banners and "
+            "signature graphics almost without exception, and indexing them "
+            "returns brand assets for every image query."
+        ),
+        category="storage",
+        type="bool",
+        milestone=3,
+        active=False,
+        advanced=True,
+    ),
+    SettingDef(
+        key="image_ocr_text_heavy",
+        label="Read text in screenshots",
+        description=(
+            "Route screenshots, scans and documents to text recognition instead "
+            "of visual embedding, so their contents become searchable.\n\n"
+            "Detection is metadata-only and costs nothing: camera EXIF marks a "
+            "photograph, exact device screen dimensions mark a screenshot, and "
+            "a mostly-white frame marks a page. Turning this off makes 'the "
+            "screenshot where Alex sent the address' unfindable."
+        ),
+        category="storage",
+        type="bool",
+        milestone=3,
+        active=False,
+    ),
+    SettingDef(
+        key="image_keep_location_exif",
+        label="Keep photo location data",
+        description=(
+            "Photos routinely carry precise GPS coordinates. Keeping them would "
+            "make 'photos from Paris' possible.\n\n"
+            "Off by default, deliberately. An indexed archive of coordinates is "
+            "a record of everywhere you have been — a much larger disclosure "
+            "than the photos themselves, and not something anyone expects a mail "
+            "assistant to build."
+        ),
+        category="storage",
+        type="bool",
+        milestone=3,
+        active=False,
+        warning="Enabling this builds a searchable history of your locations.",
+    ),
+    SettingDef(
         key="track_own_promises",
         label="Track promises you make",
         description=(

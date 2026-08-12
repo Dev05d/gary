@@ -592,7 +592,91 @@ at five years. A 1024-dim model (or a Matryoshka-truncated qwen3) cuts that
 
 ---
 
-## 11. Revised milestones
+## 11. Images
+
+Images get their own treatment because neither the text pipeline nor a single
+embedding model handles them well.
+
+### Two models, because images are two different things
+
+An image embedding encodes *what a picture looks like*. It does not read. CLIP
+sees "a screenshot of a messaging app", not the address written in it — and a
+large share of personal images are screenshots and scans, which are text
+wearing an image's clothes.
+
+So images are **routed**, not uniformly processed
+(`backend/pipeline/image_policy.py`):
+
+| Signal | Route | Why |
+|---|---|---|
+| Camera EXIF present | embed | Only a camera writes an aperture value |
+| Dimensions match a device screen exactly | OCR | No camera produces 1179×2556 |
+| Filename says "Screenshot"/"Scan" | OCR | The device already told us |
+| >55% near-white | OCR | A page, not a scene |
+| <3000 distinct colours | OCR | Flat UI palette; photos are continuous-tone |
+| Camera EXIF **and** mostly white | both | A photographed document |
+| Ambiguous PNG | both | Cheaper than guessing wrong |
+| Under 64px, or inline in email | skip | Tracking pixels, logos, spacers |
+
+Every check is metadata-only. Running OCR on a holiday photo to discover it has
+no text is exactly the waste this avoids.
+
+### Scope
+
+Email attachments and iMessage photos. **Inline email images are excluded** —
+they are logos, banners and signature graphics almost without exception, and
+embedding them returns brand assets for every query.
+
+### CLIP means a second index
+
+CLIP ViT-B/32 was chosen deliberately, and it has a structural consequence
+worth stating plainly.
+
+CLIP's vectors live in **their own space**. They cannot be compared with the
+text-embedding vectors used for messages. So:
+
+```
+query ─┬─► text embedder ──► message/chunk index ──► ranked list A
+       └─► CLIP text tower ─► image index (512-dim) ─► ranked list B
+                                                          │
+                              RRF fuses A and B ◄──────────┘
+```
+
+Two indexes, and the query is encoded twice. **RRF rescues this**: fusion is
+rank-based, not score-based, so two incomparable score scales merge correctly
+anyway. That is the same property that made RRF the right choice for BM25 +
+dense fusion (§7), and it is why CLIP remains workable despite the split space.
+
+The alternative — `nomic-embed-vision`, which shares a space with
+`nomic-embed-text` — would have collapsed this to one index and one query
+encoding, at the cost of pinning the text embedder. That trade was declined.
+
+Cost is small: 512 dimensions is 2KB per image, so even a heavy year of photos
+is well under 100MB.
+
+**Dependency note.** CLIP normally arrives via `torch` + `transformers`, which
+is roughly 2GB. An ONNX export of ViT-B/32 is ~150MB and runs on
+`onnxruntime` with no torch — the right choice for an app whose whole premise
+is running comfortably on a personal machine.
+
+### Text extracted by OCR is second-class
+
+OCR output is marked as such and ranked below text that came from a real text
+layer, because its error rate is materially higher. A retrieval hit on OCR'd
+text says where to look; it is not quotable evidence, and the grounding check
+(§4) would rightly reject a quote drawn from it.
+
+### Location data is stripped
+
+Photos routinely carry precise GPS coordinates. Indexing them would make
+"photos from Paris" possible — and would also turn the archive into a movement
+history, which is a far larger disclosure than the photos themselves and not
+something anyone expects from a mail client. GPS EXIF is removed on ingest
+unless explicitly opted in.
+
+---
+
+## 12. Revised milestones
 
 | # | Milestone | Contents |
 |---|---|---|
@@ -611,7 +695,7 @@ right.
 
 ---
 
-## 12. Threat model
+## 13. Threat model
 
 | Threat | Mitigation |
 |---|---|

@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     attachment_total_budget_gb: float = 5.0
     attachment_retention_days: int = 0          # 0 = keep while the message exists
 
+    # --- Images (Milestone 3) ----------------------------------------------
+    # CLIP vectors live in their own space, so images get a second index and
+    # the query is encoded twice. RRF fuses the two ranked lists — it is
+    # rank-based, so the incomparable score scales do not matter.
+    image_embedding_enabled: bool = True
+    image_embedding_model: str = "clip-ViT-B-32"
+    image_embed_email_attachments: bool = True
+    image_embed_imessage: bool = True
+    image_embed_inline_email: bool = False
+    image_min_dimension: int = 64
+    image_ocr_text_heavy: bool = True
+    image_keep_location_exif: bool = False
+
     # --- Extraction (Milestone 3) -----------------------------------------
     # Promises you made ("I'll send it Friday") are tracked and can remind you.
     # A higher bar than incoming commitments, so a throwaway "I'll take a look"

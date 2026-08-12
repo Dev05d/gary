@@ -912,6 +912,86 @@ reaching behind the horizon.
 
 ---
 
+---
+
+## 14. Images
+
+### 14.1 ⚠ Screenshots embedded instead of read
+A CLIP embedding of a screenshot encodes "a screenshot of a messaging app". The
+address, phone number or code written in it is simply gone. Since screenshots
+are a large share of personal images, uniformly embedding them loses most of
+the value.
+
+**Fix:** metadata-only routing (`image_policy.py`) sends text-dominant images
+to OCR and the text index instead. Camera EXIF, exact device screen
+dimensions, near-white fraction and palette size decide it, all free to obtain.
+
+### 14.2 HEIC is the iPhone default and Pillow cannot read it unaided
+Photos from an iPhone arrive as HEIC. Plain Pillow raises `UnidentifiedImageError`.
+
+**Fix:** `pillow-heif` registers the decoder. Detect the failure explicitly and
+report "HEIC support missing" rather than logging a generic image error for
+what will be the majority of photos.
+
+### 14.3 Live Photos, animations, and multi-frame images
+A Live Photo is a still plus a video. Animated GIFs and multi-page TIFFs have
+many frames.
+
+**Fix:** embed the first/key frame only, and never attempt the video component.
+
+### 14.4 ⚠ Photos carry a location history
+GPS EXIF is precise to a few metres. Indexing it across a personal archive
+produces a searchable record of everywhere the user has been — a far larger
+disclosure than the photos.
+
+**Fix:** GPS tags stripped on ingest unless explicitly opted in, with the
+setting warning what enabling it builds. Tested.
+
+### 14.5 Tracking pixels arriving as attachments
+A 1×1 GIF is a tracker whether it is inline or attached.
+
+**Fix:** the 64px floor skips them before any processing. Combined with the
+renderer never loading remote images (§12.2), a pixel has no path to fire.
+
+### 14.6 CLIP's 224×224 input destroys fine detail
+CLIP downsamples every image to 224×224. Dense text is illegible at that size,
+so a screenshot routed to CLIP by mistake is not merely weak — it is useless.
+
+**Fix:** this is why routing errs toward `BOTH` when ambiguous. A wasted OCR
+pass costs a second; a mis-embedded screenshot is unfindable forever.
+
+### 14.7 The same image forwarded repeatedly
+A meme or a logo attached to twenty messages would produce twenty vectors that
+all match each other.
+
+**Fix:** content-hash addressing means one stored file and one vector, with
+references from each message. This is the same mechanism that makes deletion
+reference-counted (§13.1).
+
+### 14.8 Corrupt or truncated image data
+Partial downloads and malformed attachments.
+
+**Fix:** decode failures mark the attachment `unreadable` and move on. One bad
+image must never abort a batch.
+
+### 14.9 OCR text is not quotable evidence
+OCR misreads characters. A commitment extracted from OCR'd text and "quoted"
+back would fail the grounding check — correctly, since the quote does not
+reliably match anything real.
+
+**Fix:** OCR-derived text is marked at ingest, ranked below real text layers,
+and excluded from being used as evidence for a commitment. It tells you where
+to look; it is not proof.
+
+### 14.10 Screenshots of Gary itself
+Screenshot the app, send it to someone, and it comes back into the corpus as a
+screenshot of a chat about your email.
+
+**Fix:** harmless but worth knowing — it is why the corpus should never be
+treated as authoritative about its own contents.
+
+---
+
 ## 10. What this changes about the plan
 
 Five items are load-bearing enough to build **with** their milestone rather
