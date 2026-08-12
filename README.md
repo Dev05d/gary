@@ -226,7 +226,7 @@ notifications, and the daily briefing. See the roadmap below.
 ## Testing it
 
 ```bash
-.venv/bin/python -m pytest              # 156 tests, no Ollama or accounts needed
+.venv/bin/python -m pytest              # 300 tests, no Ollama or accounts needed
 ```
 
 Manual smoke test:
@@ -334,7 +334,7 @@ backend/
   config.py     all configuration, one place
   main.py       app factory
 frontend/       React + Vite + TypeScript
-tests/          156 tests, mock connectors, no live accounts required
+tests/          300 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 
@@ -344,6 +344,6 @@ Design documents:
   ingestion, the three storage planes, and problems found in the original spec
 - [`docs/DATA-MODEL.md`](docs/DATA-MODEL.md) — how people, email, messages,
   calendar events, and derived facts are stored, and how retrieval works
-- [`docs/EDGE-CASES.md`](docs/EDGE-CASES.md) — failure register: ~70 cases
+- [`docs/EDGE-CASES.md`](docs/EDGE-CASES.md) — failure register: ~80 cases
   across sync, extraction, identity, retrieval, time, security, and operations,
   each with its fix

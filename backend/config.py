@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     imessage_poll_interval_seconds: int = 30
 
     # --- Extraction (Milestone 3) -----------------------------------------
+    identity_merge_policy: str = "always_ask"
+    triage_audit_rate: float = 0.05
+    importance_prior_weight: float = 0.45
     extraction_min_confidence: float = 0.35
     extraction_require_evidence: bool = True
     embed_min_tokens: int = 15

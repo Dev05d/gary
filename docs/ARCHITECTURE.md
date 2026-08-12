@@ -460,13 +460,16 @@ snapshot, not a live feed. Out of scope for this phase either way.
 - **iMessage** — the spec is too pessimistic. Reading your own local database
   with access you grant is not an auth bypass. See §5.
 
-### 8.2 Embedded vector stores lock their directory
+### 8.2 Embedded vector stores lock their directory — resolved by choosing sqlite-vec
 
-`QdrantClient(path=…)` takes an exclusive lock; a server plus separate worker
-processes cannot both open it. **Everything runs in one process with asyncio
-workers.** With live-only ingestion the volume makes this comfortable for
-years. The `VectorStore` interface keeps a Qdrant server one config change
-away.
+`QdrantClient(path=…)` takes an exclusive lock, so a server and separate worker
+processes cannot both open it. Worse, a separate store means **no transactional
+deletion**: removing a message and removing its vectors are two operations that
+can diverge, leaving orphaned vectors that surface in search results for mail
+the user deleted.
+
+**Decision: sqlite-vec.** Vectors live in the same SQLite file as everything
+else. See §12 for the measurements behind this.
 
 ### 8.3 Prompt injection is not a prompt problem
 
@@ -521,7 +524,75 @@ model names today, but it is the file that will eventually hold a key.
 
 ---
 
-## 10. Revised milestones
+## 10. Vector store: measured, not assumed
+
+The stated objection to sqlite-vec is that it brute-forces rather than building
+an ANN index, and struggles past ~1M vectors. That objection does not apply
+here, and the numbers are worth writing down.
+
+### Corpus size under live-only ingestion
+
+~100 messages/day, ~60% skipped as bulk, ~2 chunks each ≈ **80 vectors/day**.
+
+| Horizon | Vectors | 1024-dim on disk | Brute-force query |
+|---|---|---|---|
+| 1 year | 29,200 | 120 MB | 2 ms |
+| 3 years | 87,600 | 359 MB | 7 ms |
+| 5 years | 146,000 | 598 MB | 14 ms |
+
+We are two orders of magnitude below where brute force becomes a problem.
+
+### Measured with sqlite-vec (30,000 vectors, 1024-dim)
+
+| Operation | Time |
+|---|---|
+| Insert 30,000 vectors | 2.0 s |
+| Unfiltered k-NN (k=10) | 74 ms |
+| **Pre-filtered k-NN** (sender + date + not-automated) | **1 ms** |
+
+The last row is the decisive one. sqlite-vec's `vec0` tables support metadata
+columns and a `PARTITION KEY`, so a constraint like "from Sarah, last month,
+not automated" is applied **inside** the vector query. Partitioning means the
+scan touches only that sender's shard — the filtered query is 74× *faster* than
+the unfiltered one, not slower.
+
+This is precisely the pre-filtering the retrieval design requires
+([DATA-MODEL.md §8](DATA-MODEL.md)), where post-filtering would silently
+destroy recall on low-selectivity filters.
+
+### Why not the alternatives
+
+| Option | Why not |
+|---|---|
+| Embedded Qdrant | Better ANN, irrelevant at 30k vectors. Costs transactional deletes, an exclusive directory lock, and a second thing to back up. |
+| LanceDB | Genuinely good embedded option, but its IVF-PQ advantage only pays off past ~1M vectors, and it adds an Arrow/Lance dependency and separate files for no gain here. |
+| Qdrant in Docker | Breaks "runs without Docker on macOS" and adds a daemon to a personal app. |
+| In-process numpy | Fast, but reimplements persistence, filtering, and crash safety that SQLite already has. |
+
+### What this buys
+
+- **Transactional deletion.** Removing a message removes its chunks, its FTS
+  rows, and its vectors in one transaction. No orphans, no reconciliation
+  sweep, no deleted mail resurfacing in search.
+- **One file.** Backup is `cp gary.db`. So is restore.
+- **No second process, no lock contention**, and §8.2 above stops being a
+  constraint on the architecture.
+
+### The one real gotcha
+
+sqlite-vec is a loadable extension, and `sqlite3.enable_load_extension` is
+**disabled in Apple's system Python**. Homebrew and python.org builds have it.
+Startup checks for the capability and fails with the fix rather than a
+stack trace deep in a query.
+
+**Dimension note.** `qwen3-embedding:4b` emits 2560 dimensions, which is 1.5 GB
+at five years. A 1024-dim model (or a Matryoshka-truncated qwen3) cuts that
+2.5× for negligible quality loss on this workload. The default should be
+1024-dim; 2560 remains available for anyone who wants it.
+
+---
+
+## 11. Revised milestones
 
 | # | Milestone | Contents |
 |---|---|---|
@@ -540,7 +611,7 @@ right.
 
 ---
 
-## 11. Threat model
+## 12. Threat model
 
 | Threat | Mitigation |
 |---|---|

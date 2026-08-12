@@ -694,6 +694,65 @@ CATALOG: List[SettingDef] = [
         active=False,
     ),
     SettingDef(
+        key="identity_merge_policy",
+        label="Merging people",
+        description=(
+            "When Gary spots that two handles (a work email and a personal "
+            "Gmail, say) look like the same person, how eagerly should it "
+            "combine them?\n\n"
+            "'always_ask' means no merge ever happens without your approval, "
+            "however certain the evidence — a wrong merge quietly mixes two "
+            "people's history together, and one tap is cheaper than unpicking "
+            "that later. Weak guesses are still filtered out entirely rather "
+            "than queued for review."
+        ),
+        category="sync",
+        type="select",
+        options=["always_ask", "conservative", "moderate"],
+        milestone=2,
+        active=False,
+    ),
+    SettingDef(
+        key="triage_audit_rate",
+        label="Triage audit sample",
+        description=(
+            "Fraction of messages that triage skipped which get re-run through "
+            "the model anyway, to measure what the rules are missing.\n\n"
+            "Triage saves most of the GPU time by skipping bulk mail, but rules "
+            "are occasionally wrong. Sampling makes the miss rate visible "
+            "instead of assumed. The sample is deterministic, so re-running an "
+            "audit compares like with like."
+        ),
+        category="sync",
+        type="float",
+        minimum=0.0,
+        maximum=1.0,
+        step=0.01,
+        milestone=3,
+        active=False,
+        advanced=True,
+    ),
+    SettingDef(
+        key="importance_prior_weight",
+        label="Weight of your habits",
+        description=(
+            "How much your own behaviour towards a sender can move their "
+            "importance score, versus the model's reading of the message.\n\n"
+            "A fresh model cannot know your advisor outranks a newsletter, but "
+            "your reply rate and reply speed already say so. This caps that "
+            "influence: at 0.45 behaviour shades the judgement without "
+            "overriding it, so a genuinely urgent first message from a stranger "
+            "still gets through. Set to 0 to use the model's score alone."
+        ),
+        category="notifications",
+        type="float",
+        minimum=0.0,
+        maximum=0.9,
+        step=0.05,
+        milestone=6,
+        active=False,
+    ),
+    SettingDef(
         key="user_timezone",
         label="Your timezone",
         description=(

@@ -646,6 +646,102 @@ can be found and re-derived selectively.
 
 ---
 
+---
+
+## 11. Found by stress-testing the design (round 2)
+
+These emerged from re-reading the architecture rather than from building it,
+which is the cheapest place to find them.
+
+### 11.1 ⚠ Dismissal fingerprint keyed on the due date
+I specified `dismissed_fingerprint` as a hash over
+(thread, normalised title, **due date**). That is broken: when the deadline
+moves, the fingerprint changes and a task the user explicitly dismissed comes
+straight back.
+
+**Fix:** fingerprint on (thread_id, normalised title) only. A dismissal means
+"not a task, in this thread" and must survive rescheduling. The dismissal
+carries the date it was made so the UI can explain why an item is hidden.
+
+### 11.2 ⚠ The query router is a small model, and it will misclassify
+The three-plane design depends on routing "what's due Friday" to the
+commitments table. A 12B model will sometimes send it to semantic search, which
+returns plausible-looking prose and no deadlines — a wrong answer that looks
+right.
+
+**Fix:** the LLM is not the first classifier. Deterministic pre-classification
+runs first and handles the unambiguous majority: a date expression plus
+due/deadline vocabulary routes to commitments; "how many"/"count" routes to
+aggregate; a bare person name plus a time bound routes to a filtered fact
+query. The LLM router only sees what the rules cannot decide. Tools also return
+a typed "wrong plane, try X" rather than empty results, so one bad hop is
+recoverable.
+
+### 11.3 ⚠ `is_me` seeded only from connected account addresses
+"Who haven't I replied to" is wrong if any of your sending aliases is unknown —
+your own replies get counted as inbound and the thread looks unanswered.
+
+**Fix:** derive `is_me` identities from the **SENT folder**. Any address
+appearing in `From:` on a message you sent is yours, by construction. This
+catches plus-aliases, custom domains, and send-as addresses that no
+configuration screen would have surfaced.
+
+### 11.4 Enrichment lag misreported as absence
+A message lands at 09:00 and its classification is queued behind twelve others.
+At 09:01 the user asks "anything important this morning?". The message is in
+the facts plane with no importance score, so it is invisible to an
+importance-filtered query.
+
+**Fix:** ingestion and enrichment are separate stages with separate
+watermarks. Any query touching derived data reports the enrichment backlog:
+"3 messages from the last 10 minutes are still being processed." Same principle
+as the data horizon — never present a pipeline state as a finding.
+
+### 11.5 Malformed JSON from the extractor
+Ollama's `format=` constrains output, but small models still occasionally emit
+something unparseable, especially at longer context.
+
+**Fix:** one retry with a stripped-down prompt, then give up and store the
+message with `analysis_failed`. Failure to extract must never block ingestion —
+the message is still searchable, it just has no commitments. Persistent
+failures surface on the status page with the offending message IDs.
+
+### 11.6 Thread collapse breaks citation granularity
+Collapsing six chunks from one thread into a single source improves diversity,
+but then a citation points at a thread rather than the sentence that supports
+the claim.
+
+**Fix:** citations stay message-level. Collapse affects *ranking and budget*,
+not attribution — the thread is retrieved as a unit, and each claim still
+cites the specific message it came from.
+
+### 11.7 Three "reach back" mechanisms that should be one
+The design accumulated three ways to fetch older data: the optional seed
+window, the historyId-expiry bridge query, and the calendar window. Three code
+paths doing the same thing is three places for an off-by-one.
+
+**Fix:** one **bounded catch-up query** primitive — fetch source X between
+timestamps A and B, capped at N items — with all three as callers passing
+different bounds. One implementation, one set of tests.
+
+### 11.8 sqlite-vec extension loading is disabled in Apple's system Python
+`sqlite3.enable_load_extension` raises `AttributeError` on the Python that
+ships with macOS. The failure surfaces deep inside the first vector query.
+
+**Fix:** probe the capability at startup, before any ingestion, and fail with
+the actual remedy ("use Homebrew or python.org Python; Apple's build disables
+SQLite extensions") rather than a stack trace.
+
+### 11.9 Embedding model dimension drives storage more than message count
+`qwen3-embedding:4b` is 2560-dim: 1.5 GB of vectors at five years, versus
+598 MB for a 1024-dim model.
+
+**Fix:** default to a 1024-dim model. The settings page already warns that
+changing the embedding model invalidates the index; it should also show the
+projected storage for the chosen dimension.
+
+---
+
 ## 10. What this changes about the plan
 
 Five items are load-bearing enough to build **with** their milestone rather
@@ -655,11 +751,17 @@ than after:
 |---|---|---|
 | Data horizon (§6.1) | 2 | Without it the first honest-looking wrong answer ships on day one |
 | Watermark-after-pagination (§1.1) | 2 | Silent, permanent data loss |
-| `attributedBody` parsing (§2.1) | 7 | The connector otherwise "works" and ingests nothing |
+| `is_me` from the SENT folder (§11.3) | 2 | Wrong from the first message; poisons every follow-up feature |
+| Bounded catch-up primitive (§11.7) | 2 | Three copies is three chances to get it wrong |
 | Grounding checks (§5.1) | 3 | Fabricated deadlines are worse than no deadlines |
+| Dismissal fingerprint (§11.1) | 3 | Dismissed tasks resurrecting destroys trust fast |
+| Deterministic routing first (§11.2) | 5 | A misrouted query returns a confident wrong answer |
 | Pre-filtering (§6.2) | 4 | Retrofitting means rewriting the retrieval path |
+| `attributedBody` parsing (§2.1) | 7 | The connector otherwise "works" and ingests nothing |
 
-Three are already implemented and tested: the data horizon
+Five are already implemented and tested: the data horizon
 (`backend/pipeline/horizon.py`), grounding and date sanity
-(`backend/pipeline/schemas.py`), and identity resolution
-(`backend/pipeline/identity.py`).
+(`backend/pipeline/schemas.py`), identity resolution with always-ask merging
+(`backend/pipeline/identity.py`), LLM triage with audit sampling
+(`backend/pipeline/triage.py`), and behavioural importance
+(`backend/pipeline/importance.py`).
