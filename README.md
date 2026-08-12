@@ -128,7 +128,7 @@ There are two places to configure Gary, and the difference matters:
 
 - **`.env`** — bootstrap only. Enough to get the backend up: where Ollama is,
   which models to try, where the database lives. Read once at startup.
-- **The Settings page in the app** — everything else, 52 settings across 9
+- **The Settings page in the app** — everything else, 58 settings across 9
   categories, each with an explanation of what it does and what happens if you
   change it. Open it from the top bar.
 
@@ -150,8 +150,8 @@ What's in there:
 | Models | Model + context window + temperature for each of the four roles |
 | Context & memory | Reply headroom, history depth, safety margin |
 | Search & retrieval | top-k, similarity floor, chunking, and the four hybrid-ranking weights |
-| Sync & ingestion | Poll intervals, backfill depth and caps |
-| Proactive alerts | Importance threshold, rate limit, quiet hours |
+| Sync & ingestion | Check intervals, seed window, timezone, how eagerly people are merged |
+| Proactive alerts | Importance threshold, weight of your habits, rate limit, quiet hours |
 | Interface | Default model, streaming, context meter |
 | Server & security | Bind address, port, API token, CORS, log level |
 | Storage | Database URL, data directory |
@@ -209,7 +209,7 @@ Also Milestone 2.
 - Conversation history persisted in SQLite
 - Two-model routing: **Deep** / **Fast** toggle in the UI
 - Real token counting and context-window budgeting
-- **Settings page**: 52 documented settings, live connection testing, model
+- **Settings page**: 58 documented settings, live connection testing, model
   discovery, provenance tracking, and hot reload without a restart
 - Status page: backend reachability, per-role model availability, DB, counts
 - Optional bearer-token auth for non-localhost access
