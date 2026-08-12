@@ -99,8 +99,8 @@ at ingest; label state differs per account and both matter.
 A 25MB email with inline images. Fetching and storing it blocks the pipeline.
 
 **Fix:** cap `body_text` (say 256KB), set `truncated = true`, skip embedding
-the tail. Attachments are metadata-only unless explicitly downloaded, with a
-per-file and per-day size budget.
+the tail. Attachments are downloaded (see §13.7) under a per-file cap and a
+total disk budget.
 
 ### 1.11 Malformed MIME and encodings
 Old or broken mail: invalid charsets, mislabelled encodings, nested multiparts,
@@ -815,6 +815,100 @@ codebase is suspect, and flaky-by-design concurrency tests are the only thing
 that surfaces them. The same pattern to audit at Milestone 2: sync watermark
 updates, identity upserts, and commitment reconciliation — all read-then-write
 against rows that two workers can touch.
+
+---
+
+---
+
+## 13. Consequences of the mail-scope decisions
+
+Four product decisions were settled before Milestone 2. Each brought its own
+failure modes.
+
+**Decisions:** default to INBOX + SENT minus Promotions/Social/Forums, with a
+custom label picker · mirror upstream deletions · download and index text
+documents · track and remind on promises you made.
+
+### 13.1 ⚠ Deleted mail leaving attachment files on disk
+Mirroring deletions plus downloading attachments is the risky combination.
+Deleting a message row while its downloaded PDF stays on disk leaves the
+content of "deleted" mail sitting in the data directory.
+
+**Fix:** deletion cascades to the filesystem, not just the database, and the
+file delete happens inside the same unit of work as the row delete. Because
+identical attachments are stored once by content hash, a file is only removed
+once its **last** referencing message is gone — reference-counted, not
+delete-on-first-orphan.
+
+### 13.2 ⚠ CATEGORY_UPDATES must not be treated as noise
+The obvious reading of "skip the promotional tabs" is to skip all four category
+tabs. Updates is where Gmail files receipts, bills, shipping notices and
+appointment reminders — the mail with the most real deadlines in it.
+
+**Fix:** only Promotions, Social and Forums are excluded by default. Encoded in
+`label_policy.py` and covered by a test that fails if Updates is ever added to
+the exclusion set.
+
+### 13.3 A typo in a custom label silently loses mail
+`gmail_include_labels = "INBOX,Wrok"` matches nothing for the misspelled label.
+No error — that mail simply never arrives, indefinitely.
+
+**Fix:** configured labels are checked against the account's actual label list
+and unknown names are surfaced on the status page. `unknown_labels()` is
+tested.
+
+### 13.4 Changing the label scope after the fact
+Adding a label to the custom list should arguably pull in that label's recent
+mail — but live-only ingestion says no backfill.
+
+**Fix:** treat it as one more caller of the bounded catch-up primitive
+(§11.7), bounded by `seed_window_days`. If that is 0, the new label starts from
+now and the UI says so rather than implying history appeared.
+
+### 13.5 Archived mail is invisible under the default
+Mail auto-archived by a Gmail filter never carries INBOX, so the default scope
+never sees it — including filters the user reads regularly.
+
+**Fix:** not a bug, but it must be visible. The status page reports what
+fraction of recent mail was skipped and why, so "Gary never sees my newsletter
+folder" is discoverable rather than mysterious.
+
+### 13.6 Document text extraction fails silently on scans
+A photographed or scanned PDF has no text layer. Extraction returns an empty
+string, which is indistinguishable from an empty document.
+
+**Fix:** record extraction status per attachment — `extracted`, `empty`,
+`unreadable`, `ocr` — and never treat `unreadable` as "the document says
+nothing". OCR is available but off by default, and OCR'd text is marked and
+ranked below extracted text because its error rate is much higher.
+
+### 13.7 Attachment storage growth and hostile files
+Downloading turns a bounded database into an unbounded one, and attachments are
+the most hostile input in the whole system.
+
+**Fix:** a per-file size cap and a total disk budget that stops downloads and
+says so rather than filling the volume — SQLite can corrupt on a full disk.
+Files are stored under a generated ID, never the sender-supplied filename, so
+`../../.ssh/authorized_keys` cannot become a path. Archives are not expanded.
+Content-hash storage means a PDF forwarded five times costs one copy.
+
+### 13.8 Throwaway promises becoming nags
+"I'll take a look" is not a commitment. Extracting it and reminding the user
+about it is exactly how a useful feature becomes an irritant that gets turned
+off.
+
+**Fix:** promises extracted from your own sent mail carry a **higher**
+confidence floor than incoming commitments (`own_promise_min_confidence`,
+default 0.60 versus 0.35). Vague language without a date stays searchable but
+never generates a reminder.
+
+### 13.9 Promises in mail you sent before connecting
+Sent mail is only ingested from the watermark forward, so a promise made last
+week is invisible. The user will reasonably expect Gary to know about it.
+
+**Fix:** the data horizon already covers this, and "what did I promise?" is a
+temporal query — it gets the same explicit gap warning as any other question
+reaching behind the horizon.
 
 ---
 

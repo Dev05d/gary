@@ -128,7 +128,7 @@ There are two places to configure Gary, and the difference matters:
 
 - **`.env`** — bootstrap only. Enough to get the backend up: where Ollama is,
   which models to try, where the database lives. Read once at startup.
-- **The Settings page in the app** — everything else, 58 settings across 9
+- **The Settings page in the app** — everything else, 70 settings across 9
   categories, each with an explanation of what it does and what happens if you
   change it. Open it from the top bar.
 
@@ -209,7 +209,7 @@ Also Milestone 2.
 - Conversation history persisted in SQLite
 - Two-model routing: **Deep** / **Fast** toggle in the UI
 - Real token counting and context-window budgeting
-- **Settings page**: 58 documented settings, live connection testing, model
+- **Settings page**: 70 documented settings, live connection testing, model
   discovery, provenance tracking, and hot reload without a restart
 - Status page: backend reachability, per-role model availability, DB, counts
 - Optional bearer-token auth for non-localhost access
@@ -226,7 +226,7 @@ notifications, and the daily briefing. See the roadmap below.
 ## Testing it
 
 ```bash
-.venv/bin/python -m pytest              # 300 tests, no Ollama or accounts needed
+.venv/bin/python -m pytest              # 409 tests, no Ollama or accounts needed
 ```
 
 Manual smoke test:
@@ -334,7 +334,7 @@ backend/
   config.py     all configuration, one place
   main.py       app factory
 frontend/       React + Vite + TypeScript
-tests/          300 tests, mock connectors, no live accounts required
+tests/          409 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 
@@ -344,6 +344,6 @@ Design documents:
   ingestion, the three storage planes, and problems found in the original spec
 - [`docs/DATA-MODEL.md`](docs/DATA-MODEL.md) — how people, email, messages,
   calendar events, and derived facts are stored, and how retrieval works
-- [`docs/EDGE-CASES.md`](docs/EDGE-CASES.md) — failure register: ~80 cases
+- [`docs/EDGE-CASES.md`](docs/EDGE-CASES.md) — failure register: ~100 cases
   across sync, extraction, identity, retrieval, time, security, and operations,
   each with its fix

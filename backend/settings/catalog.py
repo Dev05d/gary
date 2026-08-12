@@ -694,6 +694,200 @@ CATALOG: List[SettingDef] = [
         active=False,
     ),
     SettingDef(
+        key="gmail_label_mode",
+        label="Which mail to sync",
+        description=(
+            "'default' keeps your Inbox and Sent mail and skips the Promotions, "
+            "Social and Forums tabs — typically half an inbox, and the main "
+            "source of noise in search.\n\n"
+            "Updates is deliberately kept: Gmail files receipts, bills, shipping "
+            "and appointment reminders there, and those carry real deadlines. "
+            "'all_mail' takes everything except Spam and Trash. 'custom' uses "
+            "exactly the labels you list below — useful if your filters "
+            "auto-archive things you still read."
+        ),
+        category="sync",
+        type="select",
+        options=["default", "all_mail", "custom"],
+        milestone=2,
+        active=False,
+    ),
+    SettingDef(
+        key="gmail_include_labels",
+        label="Labels to include",
+        description=(
+            "Comma-separated Gmail labels to sync when the mode above is "
+            "'custom'. Both system labels (INBOX, SENT, STARRED) and your own "
+            "work.\n\n"
+            "A misspelled label matches nothing and silently loses that mail, so "
+            "the status page flags any label here that does not exist on your "
+            "account."
+        ),
+        category="sync",
+        type="string",
+        placeholder="INBOX,SENT",
+        milestone=2,
+        active=False,
+    ),
+    SettingDef(
+        key="gmail_exclude_labels",
+        label="Labels to exclude",
+        description=(
+            "Comma-separated labels to skip, applied after the include list. "
+            "Spam, Trash and Drafts are always excluded regardless."
+        ),
+        category="sync",
+        type="string",
+        milestone=2,
+        active=False,
+        advanced=True,
+    ),
+    SettingDef(
+        key="mirror_upstream_deletions",
+        label="Mirror deletions from Gmail",
+        description=(
+            "When you delete a message in Gmail, delete Gary's copy too.\n\n"
+            "The deletion cascades: the message, its chunks, its embeddings, its "
+            "search-index rows, any deadline extracted from it, and any "
+            "attachment files downloaded from it. Nothing is left behind on "
+            "disk.\n\n"
+            "Turning this off means Gary keeps a copy of mail your mailbox no "
+            "longer has — searchable, and surprising later."
+        ),
+        category="sync",
+        type="bool",
+        milestone=2,
+        active=False,
+        warning="Deletions are permanent and cascade to extracted deadlines.",
+    ),
+    SettingDef(
+        key="attachment_download",
+        label="Download attachments",
+        description=(
+            "Fetch attachment files, not just their names. Required for "
+            "searching inside documents.\n\n"
+            "Files are stored under a generated ID, never the sender-supplied "
+            "filename — a name like '../../.ssh/authorized_keys' must never "
+            "become a path. Identical files are stored once by content hash, so "
+            "a PDF forwarded five times costs one copy."
+        ),
+        category="storage",
+        type="bool",
+        milestone=2,
+        active=False,
+    ),
+    SettingDef(
+        key="attachment_max_mb",
+        label="Attachment size limit",
+        description=(
+            "Skip attachments larger than this. Their metadata is still "
+            "recorded, so Gary knows the file exists and can name it."
+        ),
+        category="storage",
+        type="float",
+        minimum=0.1,
+        maximum=200.0,
+        step=0.5,
+        unit="MB",
+        milestone=2,
+        active=False,
+    ),
+    SettingDef(
+        key="attachment_total_budget_gb",
+        label="Attachment disk budget",
+        description=(
+            "Hard ceiling on total attachment storage. On reaching it Gary stops "
+            "downloading and says so, rather than quietly filling the disk — "
+            "SQLite can corrupt on a full volume."
+        ),
+        category="storage",
+        type="float",
+        minimum=0.1,
+        maximum=500.0,
+        step=0.5,
+        unit="GB",
+        milestone=2,
+        active=False,
+    ),
+    SettingDef(
+        key="attachment_index_text",
+        label="Search inside documents",
+        description=(
+            "Extract text from PDFs and Office documents so their contents are "
+            "searchable — 'what did the contract say about termination?'.\n\n"
+            "Extraction is reliable on documents produced digitally and "
+            "unreliable on scans and photographs, which contain no text layer at "
+            "all. Where nothing can be extracted Gary records that the document "
+            "is unreadable rather than treating it as empty."
+        ),
+        category="storage",
+        type="bool",
+        milestone=3,
+        active=False,
+    ),
+    SettingDef(
+        key="attachment_ocr_scanned",
+        label="OCR scanned documents",
+        description=(
+            "Run optical character recognition on documents with no text layer. "
+            "Makes scans and photographed paperwork searchable.\n\n"
+            "Considerably slower than text extraction and produces errors on "
+            "poor scans, so OCR'd text is marked as such and ranked below "
+            "extracted text."
+        ),
+        category="storage",
+        type="bool",
+        milestone=3,
+        active=False,
+        advanced=True,
+    ),
+    SettingDef(
+        key="track_own_promises",
+        label="Track promises you make",
+        description=(
+            "Pull commitments out of your own sent mail. 'I'll send the report "
+            "Friday' becomes something Gary knows you owe.\n\n"
+            "This is the only way anything tracks what you said you would do — "
+            "incoming mail only ever shows what others asked of you."
+        ),
+        category="notifications",
+        type="bool",
+        milestone=3,
+        active=False,
+    ),
+    SettingDef(
+        key="remind_own_promises",
+        label="Remind me about my promises",
+        description=(
+            "Surface your own promises before they come due, alongside tasks "
+            "other people gave you. Turning this off keeps them searchable but "
+            "silent."
+        ),
+        category="notifications",
+        type="bool",
+        milestone=6,
+        active=False,
+    ),
+    SettingDef(
+        key="own_promise_min_confidence",
+        label="Promise confidence floor",
+        description=(
+            "How certain the extractor must be before something you wrote counts "
+            "as a promise. Set higher than the general extraction floor on "
+            "purpose.\n\n"
+            "A throwaway 'I'll take a look' should not become a reminder, while "
+            "'I'll have it to you by Friday' should. Raise this if Gary nags you "
+            "about things you did not really commit to."
+        ),
+        category="notifications",
+        type="float",
+        minimum=0.0,
+        maximum=1.0,
+        step=0.05,
+        milestone=3,
+        active=False,
+    ),
+    SettingDef(
         key="identity_merge_policy",
         label="Merging people",
         description=(

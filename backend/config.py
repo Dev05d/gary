@@ -89,7 +89,34 @@ class Settings(BaseSettings):
     imessage_session_gap_minutes: int = 30
     imessage_poll_interval_seconds: int = 30
 
+    # --- Mail scope (Milestone 2) -----------------------------------------
+    # Default keeps INBOX + SENT and drops the Promotions/Social/Forums tabs.
+    # CATEGORY_UPDATES is deliberately kept: bills and shipping notices live
+    # there and carry real deadlines.
+    gmail_label_mode: str = "default"          # default | all_mail | custom
+    gmail_include_labels: str = "INBOX,SENT"
+    gmail_exclude_labels: str = "CATEGORY_PROMOTIONS,CATEGORY_SOCIAL,CATEGORY_FORUMS"
+
+    # Deleting in Gmail deletes locally, cascading to chunks, embeddings,
+    # commitments, and downloaded attachment files on disk.
+    mirror_upstream_deletions: bool = True
+
+    # --- Attachments (Milestone 2/3) --------------------------------------
+    attachment_download: bool = True
+    attachment_max_mb: float = 10.0
+    attachment_index_text: bool = True
+    attachment_ocr_scanned: bool = False
+    attachment_total_budget_gb: float = 5.0
+    attachment_retention_days: int = 0          # 0 = keep while the message exists
+
     # --- Extraction (Milestone 3) -----------------------------------------
+    # Promises you made ("I'll send it Friday") are tracked and can remind you.
+    # A higher bar than incoming commitments, so a throwaway "I'll take a look"
+    # does not become a nag.
+    track_own_promises: bool = True
+    remind_own_promises: bool = True
+    own_promise_min_confidence: float = 0.60
+
     identity_merge_policy: str = "always_ask"
     triage_audit_rate: float = 0.05
     importance_prior_weight: float = 0.45
