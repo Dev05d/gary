@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     llm_model_large: str = "gemma3:27b"
     llm_model_fast: str = "gemma3:12b"
     llm_model_router: str = "gemma3:12b"
-    embedding_model: str = "qwen3-embedding:4b"
+    embedding_model: str = "nomic-embed-text"
+    embedding_dimensions: int = 768
 
     # --- Context -----------------------------------------------------------
     llm_context_large: int = 32768
@@ -110,11 +111,12 @@ class Settings(BaseSettings):
     attachment_retention_days: int = 0          # 0 = keep while the message exists
 
     # --- Images (Milestone 3) ----------------------------------------------
-    # CLIP vectors live in their own space, so images get a second index and
-    # the query is encoded twice. RRF fuses the two ranked lists — it is
-    # rank-based, so the incomparable score scales do not matter.
+    # nomic-embed-vision-v1.5 shares an embedding space with
+    # nomic-embed-text-v1.5, so images and text live in ONE index and a typed
+    # query retrieves both with a single encoding. Both are 768-dimensional.
+    # The two models must be kept on matching versions or the space diverges.
     image_embedding_enabled: bool = True
-    image_embedding_model: str = "clip-ViT-B-32"
+    image_embedding_model: str = "nomic-embed-vision-v1.5"
     image_embed_email_attachments: bool = True
     image_embed_imessage: bool = True
     image_embed_inline_email: bool = False

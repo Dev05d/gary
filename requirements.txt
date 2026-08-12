@@ -16,3 +16,13 @@ python-dotenv>=1.0.1
 # cascades transactionally and metadata pre-filtering happens inside the
 # query. See docs/ARCHITECTURE.md §10 for the measurements.
 sqlite-vec>=0.1.9
+
+# AES-256-GCM for OAuth tokens at rest. Authenticated encryption so a
+# tampered blob fails loudly instead of decrypting to garbage that then gets
+# used as a token.
+cryptography>=43.0.0
+
+# Gmail / Google Calendar. google-auth handles token refresh; the API calls
+# themselves go through httpx so they share the app's client and limiter.
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.1
