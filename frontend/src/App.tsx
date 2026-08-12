@@ -12,6 +12,7 @@ import { Composer } from "./components/Composer";
 import { StatusPanel } from "./components/StatusPanel";
 import { StatusBar } from "./components/StatusBar";
 import { SettingsPage } from "./components/SettingsPage";
+import { SourcesPanel } from "./components/SourcesPanel";
 
 export type ModelRole = "large" | "fast";
 
@@ -33,6 +34,7 @@ export default function App() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [showStatus, setShowStatus] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSources, setShowSources] = useState(false);
   const [role, setRole] = useState<ModelRole>("large");
   const roleTouched = useRef(false);
   const [busy, setBusy] = useState(false);
@@ -186,7 +188,7 @@ export default function App() {
         onSelect={openConversation}
         onNew={newConversation}
         onDelete={removeConversation}
-        onOpenStatus={() => setShowStatus(true)}
+        onOpenStatus={() => setShowSources(true)}
         status={status}
       />
 
@@ -259,6 +261,10 @@ export default function App() {
             setShowStatus(false);
             setShowSettings(true);
           }}
+          onOpenSources={() => {
+            setShowStatus(false);
+            setShowSources(true);
+          }}
         />
       )}
 
@@ -266,6 +272,13 @@ export default function App() {
         <SettingsPage
           onClose={() => setShowSettings(false)}
           onSettingsChanged={refreshStatus}
+        />
+      )}
+
+      {showSources && (
+        <SourcesPanel
+          onClose={() => setShowSources(false)}
+          onChanged={refreshStatus}
         />
       )}
     </div>

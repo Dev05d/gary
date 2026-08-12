@@ -83,8 +83,23 @@ class CountsOut(BaseModel):
     chat_turns: int = 0
     messages_indexed: int = 0
     threads_indexed: int = 0
+    identities: int = 0
     embeddings: int = 0
     pending_jobs: int = 0
+
+
+class HorizonOut(BaseModel):
+    """Where each source's records begin.
+
+    Live-only ingestion makes this load-bearing: without it, an empty result
+    is indistinguishable from "it never happened".
+    """
+
+    kind: str
+    display_name: str
+    connected: bool
+    recording_since: Optional[datetime] = None
+    last_sync_at: Optional[datetime] = None
 
 
 class UiPrefs(BaseModel):
@@ -111,6 +126,8 @@ class StatusResponse(BaseModel):
     uptime_seconds: float = 0.0
     ui: UiPrefs = Field(default_factory=UiPrefs)
     restart_required: List[str] = Field(default_factory=list)
+    horizons: List[HorizonOut] = Field(default_factory=list)
+    staleness_warning: Optional[str] = None
 
 
 class HealthResponse(BaseModel):

@@ -7,17 +7,21 @@ import time
 from typing import List
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.chat.service import ChatService
 from backend.config import get_settings
 from backend.database.session import get_session, healthcheck
+from backend.database.models import Identity, Message, MessageThread, Source, SyncState
 from backend.events.bus import get_bus
+from backend.pipeline.horizon import SourceHorizon, staleness_warning
 from backend.schemas import (
     BackendStatus,
     CountsOut,
     HealthResponse,
     ModelInfo,
+    HorizonOut,
     SourceStatus,
     StatusResponse,
     UiPrefs,
@@ -30,7 +34,7 @@ router = APIRouter(prefix="/api", tags=["status"])
 #: Connectors on the roadmap. `implemented` flips as milestones land, so the
 #: status page always tells the truth about what is actually wired up.
 PLANNED_SOURCES = [
-    ("gmail", "Gmail", False),
+    ("gmail", "Gmail", True),
     ("gcal", "Google Calendar", False),
     ("imessage", "iMessage (local)", False),
     ("discord_export", "Discord (data export)", False),
@@ -108,6 +112,44 @@ async def status(
 
     convos, turns = await service.counts(session)
 
+    # Real counts from the facts plane, not placeholders.
+    messages_indexed = (
+        await session.scalar(
+            select(func.count()).select_from(Message).where(Message.deleted_at.is_(None))
+        )
+        or 0
+    )
+    threads_indexed = (
+        await session.scalar(select(func.count()).select_from(MessageThread)) or 0
+    )
+    identity_count = await session.scalar(select(func.count()).select_from(Identity)) or 0
+
+    configured = (await session.execute(select(Source))).scalars().all()
+    horizons: List[HorizonOut] = []
+    horizon_models: List[SourceHorizon] = []
+    for src in configured:
+        state = await session.get(SyncState, src.id)
+        horizons.append(
+            HorizonOut(
+                kind=src.kind,
+                display_name=src.display_name or src.kind,
+                connected=src.status == "connected",
+                recording_since=state.recording_since if state else None,
+                last_sync_at=state.last_success_at if state else None,
+            )
+        )
+        horizon_models.append(
+            SourceHorizon(
+                kind=src.kind,
+                display_name=src.display_name or src.kind,
+                recording_since=state.recording_since if state else None,
+                last_sync_at=state.last_success_at if state else None,
+                connected=src.status == "connected",
+                covers_future=src.kind == "gcal",
+            )
+        )
+    connected_kinds = {s.kind for s in configured if s.status == "connected"}
+
     return StatusResponse(
         version=VERSION,
         milestone=MILESTONE,
@@ -119,13 +161,22 @@ async def status(
             SourceStatus(
                 kind=kind,
                 display_name=name,
-                status="not_implemented",
-                enabled=False,
+                status=("connected" if kind in connected_kinds else
+                        "disconnected" if done else "not_implemented"),
+                enabled=kind in connected_kinds,
                 implemented=done,
             )
             for kind, name, done in PLANNED_SOURCES
         ],
-        counts=CountsOut(conversations=convos, chat_turns=turns),
+        counts=CountsOut(
+            conversations=convos,
+            chat_turns=turns,
+            messages_indexed=messages_indexed,
+            threads_indexed=threads_indexed,
+            identities=identity_count,
+        ),
+        horizons=horizons,
+        staleness_warning=staleness_warning(horizon_models),
         event_subscribers=get_bus().subscriber_count,
         read_only=True,
         uptime_seconds=round(time.time() - request.app.state.started_at, 1),

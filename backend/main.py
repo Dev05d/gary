@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -13,7 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.api import routes_chat, routes_settings, routes_status, ws
+from backend.api import (
+    routes_chat,
+    routes_settings,
+    routes_sources,
+    routes_status,
+    ws,
+)
 from backend.chat.service import ChatService
 from backend.config import REPO_ROOT, get_settings
 from backend.database.session import (
@@ -25,6 +32,7 @@ from backend.database.session import (
 from backend.events.bus import get_bus
 from backend.llm.registry import LLMRegistry, set_registry
 from backend.settings.service import SettingsService, set_settings_service
+from backend.workers.gmail_worker import poll_forever
 from backend.version import VERSION
 
 log = logging.getLogger("gary")
@@ -66,6 +74,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.started_at = time.time()
     #: Settings changed in the UI that only take effect after a restart.
     app.state.pending_restart = set()
+    #: In-flight OAuth attempts, in memory only — a state value that outlives
+    #: the process is a replay window for nobody's benefit.
+    app.state.pending_auth = {}
+
+    stop_workers = asyncio.Event()
+    app.state.stop_workers = stop_workers
+    app.state.worker_tasks = [
+        asyncio.create_task(poll_forever(settings, stop_workers), name="gmail-worker")
+    ]
 
     log.info("Gary v%s ready on http://%s:%s", VERSION, settings.app_host, settings.app_port)
     log.info("  chat model : %s (ctx %s)", settings.llm_model_large, settings.llm_context_large)
@@ -79,6 +96,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        stop_workers.set()
+        for task in app.state.worker_tasks:
+            task.cancel()
+        await asyncio.gather(*app.state.worker_tasks, return_exceptions=True)
+
         # Settings changes swap app.state.registry, so close whatever is
         # current rather than the one captured at startup.
         await app.state.registry.aclose()
@@ -110,6 +132,8 @@ def create_app() -> FastAPI:
     app.include_router(routes_status.router)
     app.include_router(routes_chat.router)
     app.include_router(routes_settings.router)
+    app.include_router(routes_sources.router)
+    app.include_router(routes_sources.auth_router)
     app.include_router(ws.router)
 
     _mount_frontend(app)

@@ -5,7 +5,7 @@ from backend.llm.base import LLMUnavailableError
 
 async def test_status_reports_connected_backend(client):
     body = (await client.get("/api/status")).json()
-    assert body["milestone"] == 1
+    assert body["milestone"] == 2
     assert body["database_connected"] is True
     assert body["read_only"] is True
     backend = body["llm_backends"][0]
@@ -41,8 +41,22 @@ async def test_status_counts_conversations(client):
     assert body["counts"]["conversations"] == 1
 
 
-async def test_unimplemented_connectors_are_reported_honestly(client):
+async def test_connector_status_is_reported_honestly(client):
+    """Built-but-unconnected and not-built-yet are different states."""
     body = (await client.get("/api/status")).json()
     kinds = {s["kind"]: s for s in body["sources"]}
-    assert kinds["gmail"]["implemented"] is False
-    assert kinds["gmail"]["status"] == "not_implemented"
+
+    assert kinds["gmail"]["implemented"] is True
+    assert kinds["gmail"]["status"] == "disconnected", "built, but no account linked"
+
+    assert kinds["imessage"]["implemented"] is False
+    assert kinds["imessage"]["status"] == "not_implemented"
+
+
+async def test_status_reports_the_facts_plane(client):
+    body = (await client.get("/api/status")).json()
+    counts = body["counts"]
+    assert counts["messages_indexed"] == 0
+    assert counts["threads_indexed"] == 0
+    assert counts["identities"] == 0
+    assert body["horizons"] == [], "no sources connected yet"

@@ -8,10 +8,11 @@ original message.
 file on your disk. Inference runs on Ollama, on this machine or another one on
 your LAN. Nothing is sent to a cloud API.
 
-> **Status: Milestone 1 of 9.**
-> The chat stack works end to end — FastAPI + SQLite + Ollama + a streaming UI.
-> Connectors (Gmail, Calendar, iMessage) are Milestone 2+ and are **not built
-> yet**. The status page tells you the truth about what is wired up.
+> **Status: Milestone 2 of 8.**
+> Chat works end to end, and **Gmail now syncs live** into a structured facts
+> plane. Search, embeddings, commitment extraction, Calendar and iMessage are
+> Milestones 3+ and are **not built yet**. The status page tells you the truth
+> about what is wired up.
 
 ---
 
@@ -192,19 +193,72 @@ model gets evicted to CPU and crawls, drop to 8192.
 ./start.sh --build        # build the UI and serve everything from port 8000
 ```
 
-### 8. Connect Gmail
+### 8. Create Google OAuth credentials
 
-Not yet — Milestone 2. The OAuth flow, the Google Cloud credential steps, and
-the first sync will be documented here when the connector lands.
+You need a Google Cloud project. This is free and takes about five minutes.
 
-### 9. Run the first sync
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and
+   create a project (any name).
+2. **APIs & Services → Library** → enable **Gmail API** and **Google Calendar
+   API**.
+3. **APIs & Services → OAuth consent screen**:
+   - User type: **External** (unless you have a Workspace account).
+   - Fill in app name and your email. No logo or verification needed.
+   - Add yourself under **Test users**.
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
+   - Application type: **Web application**
+   - Authorised redirect URI: `http://127.0.0.1:8000/api/auth/google/callback`
+     — this must match `GOOGLE_REDIRECT_URI` exactly, port included.
+5. Copy the client ID and secret into `.env`.
+6. Generate an encryption key for the stored tokens:
 
-Also Milestone 2.
+```bash
+python3 -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+```env
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=...
+CREDENTIAL_ENCRYPTION_KEY=...
+```
+
+Restart Gary after editing `.env`.
+
+> **The 7-day gotcha.** While your project's publishing status is **Testing**,
+> Google expires refresh tokens after 7 days and you will have to reconnect
+> weekly. To stop that, set the OAuth consent screen to **In production**. Gary
+> requests only read-only scopes; you may still see an "unverified app" warning
+> on the consent screen, which you can click through via *Advanced → Go to
+> (app name)*. Verification is only needed to distribute the app to others.
+
+Gary requests **read-only** scopes (`gmail.readonly`, `calendar.readonly`). It
+is not technically capable of sending or deleting anything — that guarantee is
+enforced by Google, not just by Gary's own tool list.
+
+### 9. Connect the account and start syncing
+
+Open **Data sources** in the sidebar → **Connect a Google account**. A Google
+tab opens; approve, and it closes itself.
+
+From that moment Gary records new mail. **Nothing historical is imported** — the
+first sync stores a watermark and ingests nothing, so it completes instantly.
+Mail arriving afterwards shows up within a minute.
+
+If you would rather not start from an empty database, set `seed_window_days`
+to `7` in Settings before connecting. It pulls one recent week, once, capped.
+
+Check progress under **Status → Records begin** and **Index**.
 
 ---
 
 ## What works right now
 
+- **Gmail sync** — live-only, watermark-based, idempotent, with label scoping,
+  mirrored deletions, and recovery from expired history without a full import
+- **Structured facts plane** — messages, threads, identities, with the
+  denormalised columns behind "who haven't I replied to"
+- **Data horizon** — Gary knows when its records begin and says so, rather than
+  reporting a coverage gap as "nothing happened"
 - Streaming chat with your local model, over SSE
 - Conversation history persisted in SQLite
 - Two-model routing: **Deep** / **Fast** toggle in the UI
@@ -226,7 +280,7 @@ notifications, and the daily briefing. See the roadmap below.
 ## Testing it
 
 ```bash
-.venv/bin/python -m pytest              # 434 tests, no Ollama or accounts needed
+.venv/bin/python -m pytest              # 470 tests, no Ollama or accounts needed
 ```
 
 Manual smoke test:
@@ -257,8 +311,8 @@ In the UI, check that:
 | # | Milestone | Contents | Status |
 |---|---|---|---|
 | 1 | Foundation | FastAPI + SQLite + Ollama + chat UI + settings | **done** |
-| 2 | Facts plane | Gmail OAuth, live watermark, polling, normalise + store | next |
-| 3 | Commitments plane | Classify, extract tasks/deadlines, ground, reconcile | |
+| 2 | Facts plane | Gmail OAuth, live watermark, polling, normalise + store | **done** |
+| 3 | Commitments plane | Classify, extract tasks/deadlines, ground, reconcile | next |
 | 4 | Semantic plane | FTS5 + chunking + embeddings + hybrid retrieval | |
 | 5 | Agent | Query router + typed read-only tools over all three planes | |
 | 6 | Calendar | Windowed sync, link events to commitments | |
@@ -334,7 +388,7 @@ backend/
   config.py     all configuration, one place
   main.py       app factory
 frontend/       React + Vite + TypeScript
-tests/          434 tests, mock connectors, no live accounts required
+tests/          470 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 

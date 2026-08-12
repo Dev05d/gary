@@ -81,9 +81,18 @@ export interface Status {
     chat_turns: number;
     messages_indexed: number;
     threads_indexed: number;
+    identities: number;
     embeddings: number;
     pending_jobs: number;
   };
+  horizons: {
+    kind: string;
+    display_name: string;
+    connected: boolean;
+    recording_since: string | null;
+    last_sync_at: string | null;
+  }[];
+  staleness_warning: string | null;
   read_only: boolean;
   uptime_seconds: number;
   ui: {
@@ -167,6 +176,46 @@ export const api = {
     }),
   deleteConversation: (id: string) =>
     request<void>(`/api/conversations/${id}`, { method: "DELETE" }),
+};
+
+// ---------------------------------------------------------------- sources
+
+export interface SourceInfo {
+  id: string;
+  kind: string;
+  display_name: string;
+  account: string | null;
+  status: string;
+  enabled: boolean;
+  recording_since: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  messages_ingested: number;
+  messages_skipped: number;
+}
+
+export interface SourcesPayload {
+  sources: SourceInfo[];
+  staleness_warning: string | null;
+  google_configured: boolean;
+  setup_hint: string | null;
+}
+
+export const sourcesApi = {
+  list: () => request<SourcesPayload>("/api/sources"),
+  startGoogleAuth: () =>
+    request<{ authorization_url: string }>("/api/auth/google/start", { method: "POST" }),
+  syncNow: (id: string) =>
+    request<{ ran: boolean; summary: string; error: string | null }>(
+      `/api/sources/${encodeURIComponent(id)}/sync`,
+      { method: "POST" },
+    ),
+  disconnect: (id: string) =>
+    request<{ disconnected: boolean }>(
+      `/api/sources/${encodeURIComponent(id)}/disconnect`,
+      { method: "POST" },
+    ),
 };
 
 // --------------------------------------------------------------- settings

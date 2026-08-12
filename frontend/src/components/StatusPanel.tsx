@@ -7,10 +7,18 @@ interface Props {
   onClose: () => void;
   onRefresh: () => void;
   onOpenSettings: () => void;
+  onOpenSources: () => void;
 }
 
 /** The observability page from spec §19. */
-export function StatusPanel({ status, error, onClose, onRefresh, onOpenSettings }: Props) {
+export function StatusPanel({
+  status,
+  error,
+  onClose,
+  onRefresh,
+  onOpenSettings,
+  onOpenSources,
+}: Props) {
   const [token, setLocalToken] = useState(getToken());
 
   return (
@@ -19,6 +27,9 @@ export function StatusPanel({ status, error, onClose, onRefresh, onOpenSettings 
         <header className="modal-head">
           <h2>System status</h2>
           <div>
+            <button className="link-btn" onClick={onOpenSources}>
+              Sources
+            </button>
             <button className="link-btn" onClick={onOpenSettings}>
               Settings
             </button>
@@ -83,12 +94,44 @@ export function StatusPanel({ status, error, onClose, onRefresh, onOpenSettings 
                 ok={status.counts.messages_indexed > 0}
               />
               <Row
+                label="Threads"
+                value={String(status.counts.threads_indexed)}
+                ok={status.counts.threads_indexed > 0}
+              />
+              <Row
+                label="People seen"
+                value={String(status.counts.identities)}
+                ok={status.counts.identities > 0}
+              />
+              <Row
                 label="Embeddings"
                 value={String(status.counts.embeddings)}
                 ok={status.counts.embeddings > 0}
               />
               <Row label="Background jobs pending" value={String(status.counts.pending_jobs)} ok />
             </Section>
+
+            {status.horizons.length > 0 && (
+              <Section title="Records begin">
+                {status.horizons.map((h) => (
+                  <Row
+                    key={h.kind}
+                    label={h.display_name}
+                    value={
+                      h.recording_since
+                        ? new Date(h.recording_since).toLocaleDateString()
+                        : "nothing yet"
+                    }
+                    ok={h.connected}
+                    note={
+                      h.recording_since
+                        ? "Gary has no record of anything before this date."
+                        : undefined
+                    }
+                  />
+                ))}
+              </Section>
+            )}
 
             <Section title="Storage">
               <Row

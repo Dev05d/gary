@@ -105,6 +105,8 @@ async def client(
         app.state.chat_service = ChatService(registry, settings)
         app.state.started_at = time.time()
         app.state.pending_restart = set()
+        app.state.pending_auth = {}
+        app.state.worker_tasks = []
         # Survive settings reloads without reaching for a real Ollama. The
         # single shared instance keeps `.calls` inspectable; reflecting the
         # requested URL back lets tests assert that a rebuild actually
