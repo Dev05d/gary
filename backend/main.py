@@ -13,12 +13,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.api import routes_chat, routes_status, ws
+from backend.api import routes_chat, routes_settings, routes_status, ws
 from backend.chat.service import ChatService
 from backend.config import REPO_ROOT, get_settings
-from backend.database.session import create_all, dispose_engine, init_engine
+from backend.database.session import (
+    create_all,
+    dispose_engine,
+    init_engine,
+    session_scope,
+)
 from backend.events.bus import get_bus
 from backend.llm.registry import LLMRegistry, set_registry
+from backend.settings.service import SettingsService, set_settings_service
 from backend.version import VERSION
 
 log = logging.getLogger("gary")
@@ -38,13 +44,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_engine(settings)
     await create_all()
 
+    # Layer any settings saved from the UI on top of .env. Done after the
+    # database is up, because that is where the overrides live.
+    settings_service = SettingsService(settings)
+    set_settings_service(settings_service)
+    async with session_scope() as session:
+        try:
+            settings = await settings_service.effective(session)
+        except Exception:  # noqa: BLE001
+            # A bad saved override must not brick startup — fall back to .env
+            # and let the user fix it in the UI.
+            log.exception("saved settings are invalid; falling back to .env")
+
     registry = LLMRegistry(settings)
     set_registry(registry)
 
     app.state.settings = settings
+    app.state.settings_service = settings_service
     app.state.registry = registry
     app.state.chat_service = ChatService(registry, settings)
     app.state.started_at = time.time()
+    #: Settings changed in the UI that only take effect after a restart.
+    app.state.pending_restart = set()
 
     log.info("Gary v%s ready on http://%s:%s", VERSION, settings.app_host, settings.app_port)
     log.info("  chat model : %s (ctx %s)", settings.llm_model_large, settings.llm_context_large)
@@ -58,9 +79,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await registry.aclose()
+        # Settings changes swap app.state.registry, so close whatever is
+        # current rather than the one captured at startup.
+        await app.state.registry.aclose()
         await dispose_engine()
         set_registry(None)
+        set_settings_service(None)
         log.info("Gary shut down cleanly")
 
 
@@ -85,6 +109,7 @@ def create_app() -> FastAPI:
 
     app.include_router(routes_status.router)
     app.include_router(routes_chat.router)
+    app.include_router(routes_settings.router)
     app.include_router(ws.router)
 
     _mount_frontend(app)

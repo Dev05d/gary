@@ -20,6 +20,7 @@ from backend.schemas import (
     ModelInfo,
     SourceStatus,
     StatusResponse,
+    UiPrefs,
 )
 from backend.security.auth import require_auth
 from backend.version import MILESTONE, VERSION
@@ -49,7 +50,9 @@ async def status(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> StatusResponse:
-    settings = get_settings()
+    # app.state.settings, not get_settings(): the settings UI can change these
+    # at runtime and the status page must reflect what is actually in use.
+    settings = getattr(request.app.state, "settings", None) or get_settings()
     registry = request.app.state.registry
     service: ChatService = request.app.state.chat_service
 
@@ -126,4 +129,11 @@ async def status(
         event_subscribers=get_bus().subscriber_count,
         read_only=True,
         uptime_seconds=round(time.time() - request.app.state.started_at, 1),
+        ui=UiPrefs(
+            default_role=settings.ui_default_role,
+            show_context_meter=settings.ui_show_context_meter,
+            show_tool_calls=settings.ui_show_tool_calls,
+            stream_responses=settings.ui_stream_responses,
+        ),
+        restart_required=sorted(getattr(request.app.state, "pending_restart", set())),
     )

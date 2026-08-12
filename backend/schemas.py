@@ -87,6 +87,15 @@ class CountsOut(BaseModel):
     pending_jobs: int = 0
 
 
+class UiPrefs(BaseModel):
+    """Interface settings the frontend needs on every poll."""
+
+    default_role: str = "large"
+    show_context_meter: bool = True
+    show_tool_calls: bool = True
+    stream_responses: bool = True
+
+
 class StatusResponse(BaseModel):
     app: str = "gary"
     version: str
@@ -100,6 +109,8 @@ class StatusResponse(BaseModel):
     event_subscribers: int = 0
     read_only: bool = True
     uptime_seconds: float = 0.0
+    ui: UiPrefs = Field(default_factory=UiPrefs)
+    restart_required: List[str] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

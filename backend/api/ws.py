@@ -23,7 +23,7 @@ HEARTBEAT_SECONDS = 25
 
 @router.websocket("/ws/events")
 async def events_socket(websocket: WebSocket, token: str = Query(default="")) -> None:
-    settings = get_settings()
+    settings = getattr(websocket.app.state, "settings", None) or get_settings()
     # Browsers cannot set headers on a WebSocket handshake, so the token rides
     # in the query string. It never leaves localhost by default.
     if settings.api_auth_token and token != settings.api_auth_token:

@@ -37,7 +37,7 @@ export function StatusBar({ status, statusError, contextUse, role }: Props) {
 
       {model && <span className="sb-item dim">ctx {(model.num_ctx / 1024).toFixed(0)}k</span>}
 
-      {contextUse && (
+      {contextUse && (status?.ui?.show_context_meter ?? true) && (
         <span className="sb-item ctx" title={`${contextUse.used} / ${contextUse.limit} tokens`}>
           <span className="ctx-bar">
             <span

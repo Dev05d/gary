@@ -6,10 +6,11 @@ interface Props {
   error: string | null;
   onClose: () => void;
   onRefresh: () => void;
+  onOpenSettings: () => void;
 }
 
 /** The observability page from spec §19. */
-export function StatusPanel({ status, error, onClose, onRefresh }: Props) {
+export function StatusPanel({ status, error, onClose, onRefresh, onOpenSettings }: Props) {
   const [token, setLocalToken] = useState(getToken());
 
   return (
@@ -18,6 +19,9 @@ export function StatusPanel({ status, error, onClose, onRefresh }: Props) {
         <header className="modal-head">
           <h2>System status</h2>
           <div>
+            <button className="link-btn" onClick={onOpenSettings}>
+              Settings
+            </button>
             <button className="link-btn" onClick={onRefresh}>
               Refresh
             </button>

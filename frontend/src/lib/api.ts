@@ -86,6 +86,13 @@ export interface Status {
   };
   read_only: boolean;
   uptime_seconds: number;
+  ui: {
+    default_role: "large" | "fast";
+    show_context_meter: boolean;
+    show_tool_calls: boolean;
+    stream_responses: boolean;
+  };
+  restart_required: string[];
 }
 
 const TOKEN_KEY = "gary.apiToken";
@@ -107,14 +114,45 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
   };
 }
 
+/** Error carrying the backend's structured {key, message} validation detail. */
+export class ApiError extends Error {
+  detail?: { key: string; message: string };
+  status: number;
+
+  constructor(message: string, status: number, detail?: { key: string; message: string }) {
+    super(message);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, { ...init, headers: headers(init.headers as Record<string, string>) });
   if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 200)}` : ""}`);
+    const raw = await res.text().catch(() => "");
+    let detail: { key: string; message: string } | undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.detail?.message) detail = parsed.detail;
+    } catch {
+      /* not JSON — fall through to the raw text */
+    }
+    throw new ApiError(
+      detail?.message ?? `${res.status} ${res.statusText}${raw ? ` — ${raw.slice(0, 200)}` : ""}`,
+      res.status,
+      detail,
+    );
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+function jsonBody(method: string, body: unknown): RequestInit {
+  return {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
 }
 
 export const api = {
@@ -129,6 +167,93 @@ export const api = {
     }),
   deleteConversation: (id: string) =>
     request<void>(`/api/conversations/${id}`, { method: "DELETE" }),
+};
+
+// --------------------------------------------------------------- settings
+
+export interface SettingCategory {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface SettingField {
+  key: string;
+  label: string;
+  description: string;
+  category: string;
+  type:
+    | "string"
+    | "text"
+    | "int"
+    | "float"
+    | "bool"
+    | "select"
+    | "secret"
+    | "url"
+    | "model";
+  minimum: number | null;
+  maximum: number | null;
+  step: number | null;
+  options: string[] | null;
+  placeholder: string | null;
+  unit: string | null;
+  model_host_key: string | null;
+  advanced: boolean;
+  restart: boolean;
+  sensitive: boolean;
+  active: boolean;
+  milestone: number;
+  warning: string | null;
+  examples: string[];
+  value: unknown;
+  is_set: boolean | null;
+  source: "default" | "env" | "database";
+  env_value: unknown;
+  default_value: unknown;
+  overridden: boolean;
+}
+
+export interface SettingsPayload {
+  categories: SettingCategory[];
+  fields: SettingField[];
+  restart_required: string[];
+}
+
+export interface SettingsUpdateResult {
+  changed: string[];
+  restart_required: string[];
+  applied_live: boolean;
+  fields: SettingField[];
+}
+
+export interface TestConnectionResult {
+  connected: boolean;
+  base_url: string;
+  version?: string | null;
+  latency_ms?: number | null;
+  models: string[];
+  error?: string | null;
+}
+
+export const settingsApi = {
+  read: () => request<SettingsPayload>("/api/settings"),
+  update: (changes: Record<string, unknown>) =>
+    request<SettingsUpdateResult>("/api/settings", jsonBody("PATCH", { changes })),
+  resetOne: (key: string) =>
+    request<SettingsUpdateResult>(`/api/settings/reset/${encodeURIComponent(key)}`, {
+      method: "POST",
+    }),
+  resetAll: () => request<SettingsUpdateResult>("/api/settings/reset", { method: "POST" }),
+  testConnection: (baseUrl: string) =>
+    request<TestConnectionResult>(
+      "/api/settings/test-connection",
+      jsonBody("POST", { base_url: baseUrl }),
+    ),
+  models: (baseUrl?: string) =>
+    request<string[]>(
+      `/api/settings/models${baseUrl ? `?base_url=${encodeURIComponent(baseUrl)}` : ""}`,
+    ),
 };
 
 // --------------------------------------------------------------- SSE chat

@@ -69,6 +69,7 @@ async def build_prompt(
     counter: TokenCounter,
     context_limit: int,
     generation_buffer: int = 2048,
+    safety_margin: int = SAFETY_MARGIN,
 ) -> BudgetResult:
     """Assemble the final message list, evicting until it fits.
 
@@ -82,7 +83,7 @@ async def build_prompt(
     system_tokens = await counter(system_prompt)
     user_tokens = await counter(user_message)
 
-    target = context_limit - SAFETY_MARGIN - generation_buffer
+    target = context_limit - safety_margin - generation_buffer
     floor = system_tokens + user_tokens
 
     notes: List[str] = []

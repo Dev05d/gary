@@ -34,8 +34,9 @@ Style: direct and concise. Lead with the answer. Use Markdown. Do not pad
 replies with restatements of the question or offers to help further.
 """
 
-#: Turns kept in the prompt before older ones are evicted by the budgeter.
-MAX_HISTORY_TURNS = 20
+#: Fallback when no settings object is available. The live value is
+#: `settings.max_history_turns`, editable from the settings page.
+DEFAULT_MAX_HISTORY_TURNS = 20
 
 
 @dataclass
@@ -83,8 +84,9 @@ class ChatService:
         return True
 
     async def history(
-        self, session: AsyncSession, conversation_id: str, *, limit: int = MAX_HISTORY_TURNS
+        self, session: AsyncSession, conversation_id: str, *, limit: Optional[int] = None
     ) -> List[ChatTurn]:
+        limit = limit or self._settings.max_history_turns
         stmt = (
             select(ChatTurn)
             .where(ChatTurn.conversation_id == conversation_id)
@@ -159,6 +161,7 @@ class ChatService:
             counter=counter,
             context_limit=binding.num_ctx,
             generation_buffer=self._settings.llm_generation_buffer,
+            safety_margin=self._settings.context_safety_margin,
         )
 
         assistant_turn = ChatTurn(
@@ -198,7 +201,7 @@ class ChatService:
                 budget.messages,
                 model=binding.model,
                 num_ctx=binding.num_ctx,
-                temperature=self._settings.llm_temperature,
+                temperature=self._settings.temperature_for(role),  # type: ignore[arg-type]
             ):
                 if chunk.delta:
                     buffer.append(chunk.delta)

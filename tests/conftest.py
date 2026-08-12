@@ -21,6 +21,7 @@ from backend.database.session import (  # noqa: E402
 )
 from backend.events.bus import reset_bus  # noqa: E402
 from backend.llm.registry import LLMRegistry  # noqa: E402
+from backend.settings.service import SettingsService  # noqa: E402
 from tests.fakes import FakeProvider  # noqa: E402
 
 
@@ -70,7 +71,9 @@ async def session(db) -> AsyncIterator:
 
 
 @pytest_asyncio.fixture
-async def client(db, settings: Settings, registry: LLMRegistry) -> AsyncIterator:
+async def client(
+    db, settings: Settings, registry: LLMRegistry, fake_provider: FakeProvider
+) -> AsyncIterator:
     """HTTP client wired to the real app with a fake LLM behind it.
 
     httpx.ASGITransport does not run lifespan, so the state that `lifespan()`
@@ -97,9 +100,20 @@ async def client(db, settings: Settings, registry: LLMRegistry) -> AsyncIterator
     try:
         app = create_app()
         app.state.settings = settings
+        app.state.settings_service = SettingsService(settings)
         app.state.registry = registry
         app.state.chat_service = ChatService(registry, settings)
         app.state.started_at = time.time()
+        app.state.pending_restart = set()
+        # Survive settings reloads without reaching for a real Ollama. The
+        # single shared instance keeps `.calls` inspectable; reflecting the
+        # requested URL back lets tests assert that a rebuild actually
+        # re-pointed the registry.
+        def _factory(url: str) -> FakeProvider:
+            fake_provider.base_url = url
+            return fake_provider
+
+        app.state.provider_factory = _factory
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

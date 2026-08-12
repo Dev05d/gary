@@ -11,16 +11,22 @@ from __future__ import annotations
 import hmac
 from typing import Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from backend.config import Settings, get_settings
 
 
+def _active_settings(request: Request) -> Settings:
+    """Prefer the live settings object so a token set in the UI applies at once."""
+    return getattr(request.app.state, "settings", None) or get_settings()
+
+
 async def require_auth(
+    request: Request,
     authorization: Optional[str] = Header(default=None),
     x_gary_token: Optional[str] = Header(default=None, alias="X-Gary-Token"),
 ) -> None:
-    settings: Settings = get_settings()
+    settings = _active_settings(request)
     expected = settings.api_auth_token
     if not expected:
         return

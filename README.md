@@ -122,9 +122,45 @@ OLLAMA_EMBED_BASE_URL=http://192.168.1.99:11434
 Gary opens one connection pool per distinct URL and the status page shows the
 health of each.
 
-### 5. Configure `.env`
+### 5. Configure
 
-Copy `.env.example` and edit. The settings that matter most:
+There are two places to configure Gary, and the difference matters:
+
+- **`.env`** — bootstrap only. Enough to get the backend up: where Ollama is,
+  which models to try, where the database lives. Read once at startup.
+- **The Settings page in the app** — everything else, 52 settings across 9
+  categories, each with an explanation of what it does and what happens if you
+  change it. Open it from the top bar.
+
+Settings changed in the app are stored in Gary's database and layer on top of
+`.env`. **Your `.env` file is never modified.** Every setting shows where its
+current value came from — built-in default, `.env`, or the settings page — and
+has a Reset button to drop back a layer.
+
+Most changes apply immediately, including swapping models or repointing at a
+different Ollama host: the connection pool is rebuilt and the next message uses
+the new setting. The handful that genuinely cannot change at runtime (bind
+address, port, database URL) are tagged `restart` and the page tells you.
+
+What's in there:
+
+| Category | Covers |
+|---|---|
+| Inference host | Ollama URL, separate embeddings host, timeout, keep-alive — with a **Test** button that probes a host and lists its installed models before you commit |
+| Models | Model + context window + temperature for each of the four roles |
+| Context & memory | Reply headroom, history depth, safety margin |
+| Search & retrieval | top-k, similarity floor, chunking, and the four hybrid-ranking weights |
+| Sync & ingestion | Poll intervals, backfill depth and caps |
+| Proactive alerts | Importance threshold, rate limit, quiet hours |
+| Interface | Default model, streaming, context meter |
+| Server & security | Bind address, port, API token, CORS, log level |
+| Storage | Database URL, data directory |
+
+Settings for features that aren't built yet (retrieval, sync, alerts) are shown
+greyed out and labelled with the milestone that activates them. They save now
+and take effect when that milestone lands — nothing pretends to work early.
+
+The `.env` settings that matter most:
 
 | Variable | What it does |
 |---|---|
@@ -173,6 +209,8 @@ Also Milestone 2.
 - Conversation history persisted in SQLite
 - Two-model routing: **Deep** / **Fast** toggle in the UI
 - Real token counting and context-window budgeting
+- **Settings page**: 52 documented settings, live connection testing, model
+  discovery, provenance tracking, and hot reload without a restart
 - Status page: backend reachability, per-role model availability, DB, counts
 - Optional bearer-token auth for non-localhost access
 - Prompt-injection trust boundary and the read-only capability model (the
@@ -188,7 +226,7 @@ notifications, and the daily briefing. See the roadmap below.
 ## Testing it
 
 ```bash
-.venv/bin/python -m pytest              # 99 tests, no Ollama or accounts needed
+.venv/bin/python -m pytest              # 130 tests, no Ollama or accounts needed
 ```
 
 Manual smoke test:
@@ -282,7 +320,7 @@ backend/
   config.py     all configuration, one place
   main.py       app factory
 frontend/       React + Vite + TypeScript
-tests/          99 tests, mock connectors, no live accounts required
+tests/          130 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 
