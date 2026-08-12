@@ -1,0 +1,13 @@
+# Gary — Local Personal Intelligence Agent
+# Milestone 1 runtime dependencies.
+# Deliberately small: no LLM SDKs, no vector DB yet (those arrive in M3).
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+SQLAlchemy[asyncio]>=2.0.36
+aiosqlite>=0.20.0
+alembic>=1.14.0
+httpx>=0.27.0
+python-dotenv>=1.0.1

@@ -1,1 +1,290 @@
-# gary
+# Gary — Local Personal Intelligence Agent
+
+A private, local-first assistant that ingests your digital life, stores it on
+your own machine, and answers questions about it — with citations back to the
+original message.
+
+**Everything stays local.** Your mail, messages, and calendar live in a SQLite
+file on your disk. Inference runs on Ollama, on this machine or another one on
+your LAN. Nothing is sent to a cloud API.
+
+> **Status: Milestone 1 of 9.**
+> The chat stack works end to end — FastAPI + SQLite + Ollama + a streaming UI.
+> Connectors (Gmail, Calendar, iMessage) are Milestone 2+ and are **not built
+> yet**. The status page tells you the truth about what is wired up.
+
+---
+
+## Quick start
+
+```bash
+git clone <this repo> && cd gary
+cp .env.example .env      # then edit: model names + Ollama URL
+./start.sh
+```
+
+Open <http://localhost:5173>.
+
+That's it — `start.sh` creates the virtualenv, installs dependencies, creates
+the database, checks that Ollama is reachable, and starts both servers.
+
+---
+
+## Requirements
+
+| Thing | Version | Notes |
+|---|---|---|
+| Python | 3.11+ | 3.12 recommended |
+| Node.js | 18+ | frontend only |
+| Ollama | any recent | local or on another machine |
+
+Apple Silicon is the primary target; the backend is pure Python and the
+frontend is plain Vite, so Linux works too.
+
+---
+
+## Setup, step by step
+
+### 1. Install dependencies
+
+`./start.sh` does this for you. Manually:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cd frontend && npm install && cd ..
+```
+
+### 2. Install Ollama
+
+```bash
+brew install ollama        # macOS
+ollama serve               # leave running
+```
+
+### 3. Download models
+
+Gary uses **two model sizes on purpose** (spec §25): a large one for reasoning
+and a small fast one for classification and extraction. Pick what your RAM can
+hold:
+
+```bash
+# 32GB+ machine
+ollama pull gemma3:27b     # large
+ollama pull gemma3:12b     # fast
+
+# 16GB machine
+ollama pull gemma3:12b     # large
+ollama pull qwen3:8b       # fast
+```
+
+Then set the tags in `.env`. **Check the tag actually exists first** — model
+names change between releases:
+
+```bash
+ollama list                # what you have
+```
+
+Nothing in the source hard-codes a model name. If `ollama list` shows it, Gary
+can use it.
+
+### 4. Running the model on another machine
+
+This is a first-class setup, not an afterthought. On the machine with the GPU:
+
+```bash
+OLLAMA_HOST=0.0.0.0 ollama serve
+```
+
+(The default binds to loopback only, so the LAN cannot reach it. This is the
+single most common reason "it won't connect".)
+
+Then in `.env` on the machine running Gary:
+
+```env
+OLLAMA_BASE_URL=http://192.168.1.42:11434
+```
+
+Verify before starting Gary:
+
+```bash
+curl http://192.168.1.42:11434/api/version
+```
+
+You can also split roles across machines — chat on the desktop, embeddings on
+the laptop:
+
+```env
+OLLAMA_BASE_URL=http://192.168.1.42:11434
+OLLAMA_EMBED_BASE_URL=http://192.168.1.99:11434
+```
+
+Gary opens one connection pool per distinct URL and the status page shows the
+health of each.
+
+### 5. Configure `.env`
+
+Copy `.env.example` and edit. The settings that matter most:
+
+| Variable | What it does |
+|---|---|
+| `OLLAMA_BASE_URL` | Where inference runs. Any host on your LAN. |
+| `LLM_MODEL_LARGE` / `LLM_MODEL_FAST` | Model tags from `ollama list`. |
+| `LLM_CONTEXT_LARGE` | Context window in tokens. Default **32768**. |
+| `LLM_GENERATION_BUFFER` | Tokens reserved for the reply (default 2048). |
+| `APP_HOST` | `127.0.0.1`. Changing this requires `API_AUTH_TOKEN`. |
+
+**About context length.** `LLM_CONTEXT_*` is passed to Ollama as `num_ctx`, and
+Gary budgets the prompt to fit inside it — measuring real tokens via Ollama's
+tokenizer and evicting the oldest content when needed, retrieved context first,
+then whole conversation turns. The system prompt and your actual question are
+never evicted. The meter in the status bar shows live utilisation.
+
+Bigger windows cost memory. 32k is comfortable for a 27B model on 32GB+. If the
+model gets evicted to CPU and crawls, drop to 8192.
+
+### 6. Start the backend
+
+```bash
+./start.sh --api          # backend only, http://127.0.0.1:8000
+```
+
+### 7. Start the frontend
+
+```bash
+./start.sh                # both, UI at http://localhost:5173
+./start.sh --build        # build the UI and serve everything from port 8000
+```
+
+### 8. Connect Gmail
+
+Not yet — Milestone 2. The OAuth flow, the Google Cloud credential steps, and
+the first sync will be documented here when the connector lands.
+
+### 9. Run the first sync
+
+Also Milestone 2.
+
+---
+
+## What works right now
+
+- Streaming chat with your local model, over SSE
+- Conversation history persisted in SQLite
+- Two-model routing: **Deep** / **Fast** toggle in the UI
+- Real token counting and context-window budgeting
+- Status page: backend reachability, per-role model availability, DB, counts
+- Optional bearer-token auth for non-localhost access
+- Prompt-injection trust boundary and the read-only capability model (the
+  scaffolding is in place and tested *before* any external data can arrive)
+
+## What is deliberately not built yet
+
+Gmail, Calendar, iMessage, search, embeddings, the agent tool loop,
+notifications, and the daily briefing. See the roadmap below.
+
+---
+
+## Testing it
+
+```bash
+.venv/bin/python -m pytest              # 99 tests, no Ollama or accounts needed
+```
+
+Manual smoke test:
+
+```bash
+curl http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:8000/api/status | python3 -m json.tool
+
+curl -N -X POST http://127.0.0.1:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Are you running locally?"}'
+```
+
+You should see an SSE stream: `start`, then `token` events, then `done`.
+
+In the UI, check that:
+1. The pill top-right reads **● LIVE** (green) — the backend can reach Ollama.
+2. A reply streams in word by word.
+3. The status bar shows the model name, `ctx 32k`, and a context meter.
+4. **Status** lists your models with `available: true`.
+5. Killing Ollama (`pkill ollama`) turns the pill grey and produces a readable
+   error in chat rather than a spinner that never resolves.
+
+---
+
+## Roadmap
+
+| # | Milestone | Status |
+|---|---|---|
+| 1 | FastAPI + SQLite + Ollama + chat UI | **done** |
+| 2 | Gmail OAuth + initial sync | next |
+| 3 | FTS5 + embeddings + hybrid retrieval | |
+| 4 | Gmail push notifications / live ingestion | |
+| 5 | Agent tool loop | |
+| 6 | Importance classification + notifications | |
+| 7 | Google Calendar | |
+| 8 | Daily briefing | |
+| 9 | Additional connectors | |
+
+---
+
+## A note on the connectors you asked for
+
+Not every service can be integrated the same way, and it is worth being clear
+about which ones are real before you count on them.
+
+| Source | How | Viable? |
+|---|---|---|
+| **Gmail** | Official Gmail API, OAuth 2.0, incremental `historyId` sync + Pub/Sub push | Yes — fully |
+| **Google Calendar** | Official Calendar API, same OAuth grant | Yes — fully |
+| **iMessage** | Read-only copy of your own `~/Library/Messages/chat.db` on this Mac, with Full Disk Access you grant | Yes — local-only, macOS, this machine's history |
+| **Discord DMs** | The official bot API cannot read your personal DMs. Self-bots violate the ToS and get accounts banned. | Import from your **Discord Data Export** instead |
+| **Instagram DMs** | The Messaging API only covers Business/Creator accounts receiving customer messages, and needs app review. Personal DMs are not available. | Import from your **Instagram Data Export** instead |
+
+For Discord and Instagram, Milestone 9 will ship an importer that reads the
+official data-export archives you download from those services. It is a
+snapshot rather than a live feed — but it is legitimate, it does not risk your
+accounts, and it makes those conversations searchable alongside everything
+else. See `docs/ARCHITECTURE.md` for the reasoning in full.
+
+---
+
+## Security
+
+- **Read-only by design.** Gary has no tool that can send email, delete a
+  message, or modify your calendar. This is enforced by a capability check, not
+  by asking the model nicely. See `backend/security/permissions.py`.
+- **Untrusted content is fenced.** Anything retrieved from email or messages is
+  wrapped in delimiters the content cannot forge, and the system prompt states
+  that fenced text is data, never instruction. See
+  `backend/security/prompt_guard.py` and its tests.
+- **Localhost only by default.** The app refuses to start on a non-loopback
+  host without `API_AUTH_TOKEN` set.
+- **OAuth tokens never reach the browser.** Credentials live in the backend,
+  encrypted at rest with `CREDENTIAL_ENCRYPTION_KEY`.
+- **Secrets are not committed.** `.env` is gitignored; `.env.example` has no
+  real values.
+
+---
+
+## Project layout
+
+```
+backend/
+  api/          HTTP routes + WebSocket event feed
+  chat/         conversation persistence, prompt assembly
+  database/     SQLAlchemy models + async session
+  events/       normalised event bus
+  llm/          provider abstraction, Ollama impl, model registry, budgeting
+  security/     prompt-injection guard, capabilities, API auth
+  config.py     all configuration, one place
+  main.py       app factory
+frontend/       React + Vite + TypeScript
+tests/          99 tests, mock connectors, no live accounts required
+docs/           architecture notes
+```
+
+Full design rationale, the target database schema, and the retrieval plan:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).

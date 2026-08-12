@@ -1,0 +1,27 @@
+# Optional. Gary runs fine without Docker — `./start.sh` is the primary path.
+#
+# IMPORTANT: Ollama is deliberately NOT in this file.
+# Docker Desktop on macOS has no Metal/GPU passthrough, so an Ollama container
+# on an Apple Silicon Mac runs inference on the CPU — several times slower than
+# running it natively. Install Ollama natively (`brew install ollama`) and point
+# OLLAMA_BASE_URL at it, whether it is on this machine or another one.
+#
+# Usage:
+#   docker compose up --build
+#   # then set OLLAMA_BASE_URL=http://host.docker.internal:11434 in .env
+
+services:
+  gary:
+    build: .
+    ports:
+      # Bound to loopback: the container is not exposed to the LAN.
+      - "127.0.0.1:8000:8000"
+    env_file: .env
+    environment:
+      APP_HOST: "0.0.0.0" # inside the container only; the port bind above is the real boundary
+      DATABASE_URL: "sqlite+aiosqlite:///./data/gary.db"
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
