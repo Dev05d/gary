@@ -13,6 +13,9 @@ specification, and the data model that later milestones build out.
 Scope for the next phase is deliberately narrow: **Gmail, Google Calendar, and
 iMessage.** Nothing else.
 
+Companions: [DATA-MODEL.md](DATA-MODEL.md) for storage and retrieval detail,
+[EDGE-CASES.md](EDGE-CASES.md) for the failure register.
+
 ---
 
 ## 1. Should email be stored as semantic vectors?

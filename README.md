@@ -338,5 +338,12 @@ tests/          156 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 
-Full design rationale, the target database schema, and the retrieval plan:
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Design documents:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — overall shape, live-only
+  ingestion, the three storage planes, and problems found in the original spec
+- [`docs/DATA-MODEL.md`](docs/DATA-MODEL.md) — how people, email, messages,
+  calendar events, and derived facts are stored, and how retrieval works
+- [`docs/EDGE-CASES.md`](docs/EDGE-CASES.md) — failure register: ~70 cases
+  across sync, extraction, identity, retrieval, time, security, and operations,
+  each with its fix
