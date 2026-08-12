@@ -4,6 +4,48 @@ import remarkGfm from "remark-gfm";
 import type { ChatTurn } from "../lib/api";
 import type { PendingTurn } from "../App";
 
+/**
+ * Markdown rendering rules for untrusted content.
+ *
+ * react-markdown already refuses raw HTML and neutralises `javascript:` URIs,
+ * so `<script>`, `<iframe>` and `onerror` handlers never reach the DOM. What it
+ * does *not* stop is a plain markdown image: `![x](https://tracker/p.gif)`
+ * renders an <img> and the browser fetches it.
+ *
+ * That is a tracking pixel. Loading one tells the sender you read the message,
+ * when, and roughly where from — and from Milestone 3 this renderer will be
+ * showing text that came out of your inbox. Images are therefore never loaded;
+ * the reference is shown instead, and the user can open it deliberately.
+ */
+const SAFE_MARKDOWN_COMPONENTS = {
+  img: ({ src, alt }: { src?: string; alt?: string }) => (
+    <span className="blocked-image" title={src ?? ""}>
+      🚫 image not loaded{alt ? `: ${alt}` : ""}
+    </span>
+  ),
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+    // noopener/noreferrer: a link out of a message must not hand the target a
+    // window handle or a referrer that leaks what the user was reading.
+    <a href={href} target="_blank" rel="noopener noreferrer nofollow">
+      {children}
+    </a>
+  ),
+};
+
+/** Strip every scheme except the handful that are safe to click. */
+function safeUrl(url: string): string {
+  const trimmed = url.trim().toLowerCase();
+  if (
+    trimmed.startsWith("javascript:") ||
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("vbscript:") ||
+    trimmed.startsWith("file:")
+  ) {
+    return "";
+  }
+  return url;
+}
+
 interface Props {
   turns: ChatTurn[];
   pending: PendingTurn | null;
@@ -27,7 +69,13 @@ export function MessageList({ turns, pending }: Props) {
           {turn.error ? (
             <ErrorBox message={turn.error} />
           ) : (
-            <Markdown remarkPlugins={[remarkGfm]}>{turn.content}</Markdown>
+            <Markdown
+              remarkPlugins={[remarkGfm]}
+              components={SAFE_MARKDOWN_COMPONENTS}
+              urlTransform={safeUrl}
+            >
+              {turn.content}
+            </Markdown>
           )}
           {turn.citations?.sources?.length ? (
             <Citations sources={turn.citations.sources} />
@@ -49,7 +97,13 @@ export function MessageList({ turns, pending }: Props) {
           {pending.error ? (
             <ErrorBox message={pending.error} />
           ) : pending.content ? (
-            <Markdown remarkPlugins={[remarkGfm]}>{pending.content}</Markdown>
+            <Markdown
+              remarkPlugins={[remarkGfm]}
+              components={SAFE_MARKDOWN_COMPONENTS}
+              urlTransform={safeUrl}
+            >
+              {pending.content}
+            </Markdown>
           ) : (
             <span className="cursor" />
           )}

@@ -23,10 +23,11 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import Settings
-from backend.database.models import AppSetting
+from backend.database.models import AppSetting, utcnow
 from backend.settings.catalog import (
     BY_KEY,
     CATALOG,
@@ -171,12 +172,23 @@ class SettingsService:
         return await self.effective(session)
 
     async def _write(self, session: AsyncSession, key: str, value: Any) -> None:
-        row_key = OVERRIDE_PREFIX + key
-        row = await session.get(AppSetting, row_key)
-        if row is None:
-            session.add(AppSetting(key=row_key, value={"v": value}))
-        else:
-            row.value = {"v": value}
+        """Atomic upsert.
+
+        The obvious `get()` then `add()`-or-mutate is a check-then-act race:
+        two concurrent saves both observe no row, both INSERT, and the second
+        dies on the primary-key constraint. That is not hypothetical — a user
+        clicking Save twice, or the UI saving while a worker persists a
+        derived setting, hits it. Found by a concurrency test failing on
+        roughly one run in twelve.
+        """
+        stmt = sqlite_insert(AppSetting).values(
+            key=OVERRIDE_PREFIX + key, value={"v": value}, updated_at=utcnow()
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[AppSetting.key],
+            set_={"value": stmt.excluded.value, "updated_at": stmt.excluded.updated_at},
+        )
+        await session.execute(stmt)
 
     async def _delete(self, session: AsyncSession, key: str) -> None:
         row = await session.get(AppSetting, OVERRIDE_PREFIX + key)

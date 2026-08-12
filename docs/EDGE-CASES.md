@@ -742,6 +742,82 @@ projected storage for the chosen dimension.
 
 ---
 
+---
+
+## 12. Found by testing, not by reading (round 3)
+
+Both of these were live defects in shipped code, found by attacking it rather
+than re-reading it.
+
+### 12.1 ⚠⚠ Grounding accepted quotes assembled from scattered words
+The anti-hallucination check compared a quote to the message as a **bag of
+words**: what fraction of the quote's tokens appear anywhere in the source.
+That is trivially defeated.
+
+Given a message reading *"Please review the attached report before the team
+meeting. The meeting is Thursday…"*, the fabricated quote **"the report is due
+Thursday"** scored 0.80 and was **accepted** — despite the word "due" appearing
+nowhere in the message. A model inventing a deadline from words it saw
+elsewhere in the email passed the exact check that exists to stop it.
+
+**Fix:** grounding now requires **contiguity**, not mere presence. A fuzzy match
+must contain an unbroken run of at least 4 matching tokens (or the whole quote,
+if shorter), measured with a sequence diff over token lists rather than set
+membership. All four fabrication variants are now rejected with the reason
+"words appear in the message but never together", while genuine quotes —
+including ones reworded slightly around a real span — still pass.
+
+Two implementation notes: `autojunk` is disabled on the sequence matcher,
+because its "ignore frequent elements" heuristic discards exactly the common
+words that make a quote a quote; and the source is capped at 6000 tokens to
+bound the O(n·m) diff on long threads.
+
+### 12.2 ⚠ Markdown images fired tracking pixels
+The chat renderer refuses raw HTML, so `<script>`, `<iframe>`, `onerror` and
+`javascript:` URIs were all correctly neutralised — verified in a real browser.
+
+But **plain markdown image syntax is not HTML.** `![x](https://tracker/p.gif)`
+rendered an `<img>` and the browser fetched it. A browser-level check confirmed
+a real outbound request to the tracker.
+
+This is the tracking-pixel problem from §8.3, arriving through a door that
+section did not cover. It is latent today — a local model will not emit a
+tracker — but from Milestone 3 this renderer displays text that came out of the
+user's inbox, and a pixel embedded there would report back when and where the
+mail was read.
+
+**Fix:** images are never loaded. The renderer substitutes a visible "image not
+loaded" marker carrying the URL, so nothing is hidden and the user can open it
+deliberately. Links additionally get `noopener noreferrer nofollow`, so
+following one out of a message hands the target neither a window handle nor a
+referrer revealing what was being read. Re-verified in the browser: **zero
+external requests**, with bold, code, tables and links still rendering.
+
+**Generalised lesson:** "sanitise the HTML" is not the same as "make no network
+requests". The second is the property that actually matters, and it needs
+testing at the browser level — no amount of reading the sanitiser would have
+found this.
+
+### 12.3 ⚠ Settings save was a check-then-act race
+`SettingsService._write` read the row, then inserted if absent or mutated if
+present. Two concurrent saves both observe no row, both INSERT, and the second
+dies on `UNIQUE constraint failed: app_settings.key`.
+
+Not hypothetical: a double-click on Save, or the UI saving while a background
+job persists a derived setting, hits it. A concurrency test caught it failing
+on roughly **one run in twelve** — invisible to a single-run suite.
+
+**Fix:** an atomic `INSERT … ON CONFLICT DO UPDATE`. Zero failures in 20
+consecutive runs afterwards.
+
+**Generalised lesson:** every read-modify-write against shared state in this
+codebase is suspect, and flaky-by-design concurrency tests are the only thing
+that surfaces them. The same pattern to audit at Milestone 2: sync watermark
+updates, identity upserts, and commitment reconciliation — all read-then-write
+against rows that two workers can touch.
+
+---
+
 ## 10. What this changes about the plan
 
 Five items are load-bearing enough to build **with** their milestone rather

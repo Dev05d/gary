@@ -72,7 +72,7 @@ def test_smart_quotes_and_dashes_do_not_break_grounding():
 def test_fabricated_quote_is_rejected():
     r = verify_grounding("your tuition payment of $4,200 is overdue", EMAIL)
     assert not r.grounded
-    assert "appears in the message" in r.reason
+    assert r.reason, "a rejection must explain itself"
 
 
 def test_slightly_reworded_quote_passes_on_overlap():
@@ -256,3 +256,84 @@ def test_schema_is_json_serialisable_for_ollama_format():
 def test_confidence_must_be_a_probability():
     with pytest.raises(ValueError):
         commitment(confidence=1.5)
+
+
+# --------------------------------------------- fabricated-quote bypass (fixed)
+
+FABRICATION_SOURCE = """Hi,
+
+Please review the attached report before the team meeting. The meeting is
+Thursday in the usual room. Let me know if you have questions.
+
+Best,
+Alex
+"""
+
+
+@pytest.mark.parametrize(
+    "fabricated,note",
+    [
+        ("the report is due Thursday", "'due' appears nowhere in the message"),
+        ("the report before Thursday", "every word present, never adjacent"),
+        ("review the meeting questions Thursday", "real words, shuffled order"),
+        ("the meeting is due before the report", "recombined into a new claim"),
+    ],
+)
+def test_quotes_assembled_from_scattered_words_are_rejected(fabricated, note):
+    """Bag-of-words overlap alone lets a model invent a deadline.
+
+    Given a message containing 'report', 'the', and 'Thursday' in different
+    places, 'the report is due Thursday' scored 0.8 on token overlap despite
+    'due' never appearing. Grounding now requires the matching tokens to be
+    contiguous, not merely present.
+    """
+    result = verify_grounding(fabricated, FABRICATION_SOURCE)
+    assert not result.grounded, note
+    assert "never together" in result.reason or "of the quote appears" in result.reason
+
+
+@pytest.mark.parametrize(
+    "genuine",
+    [
+        "Please review the attached report",
+        "review the attached report before the team meeting",
+        "The meeting is Thursday in the usual room",
+        "Let me know if you have questions",
+    ],
+)
+def test_genuine_contiguous_quotes_still_pass(genuine):
+    assert verify_grounding(genuine, FABRICATION_SOURCE).grounded
+
+
+def test_minor_rewording_of_a_real_span_still_passes():
+    """Contiguity must not become an exact-match requirement."""
+    source = "The research proposal is due by Friday the 15th at 5pm sharp."
+    assert verify_grounding("research proposal is due by Friday", source).grounded
+
+
+def test_fabricated_commitment_is_dropped_end_to_end():
+    """The bypass, exercised through sanitise() rather than the primitive."""
+    fake = commitment(
+        title="Submit report by Thursday",
+        evidence_quote="the report is due Thursday",
+    )
+    result = sanitise(
+        MessageAnalysis(commitments=[fake]),
+        source_text=FABRICATION_SOURCE,
+        message_time=SENT_AT,
+    )
+    assert result.analysis.commitments == []
+    assert any("ungrounded" in d for d in result.dropped)
+
+
+def test_grounding_on_a_long_thread_is_not_pathological():
+    """SequenceMatcher is O(n*m); confirm a realistic long thread stays fast."""
+    import time
+
+    long_source = ("Thanks for the update on the project. " * 2000)
+    quote = "Thanks for the update on the project"
+    start = time.perf_counter()
+    for _ in range(5):
+        verify_grounding(quote, long_source)
+    elapsed = (time.perf_counter() - start) / 5
+    assert elapsed < 1.0, f"grounding took {elapsed:.2f}s on a long thread"

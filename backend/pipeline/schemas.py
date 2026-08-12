@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import List, Literal, Optional
@@ -193,13 +194,38 @@ def _normalise(text: str) -> str:
     return _WS.sub(" ", text).strip().lower()
 
 
-def _token_overlap(quote: str, source: str) -> float:
-    """Fraction of the quote's tokens present in the source."""
+#: Tokens of unbroken agreement required for a fuzzy match to count.
+#: Without a contiguity requirement, a fabricated quote assembled from words
+#: scattered across the message passes trivially: given "review the attached
+#: report ... the meeting is Thursday", the invented quote "the report is due
+#: Thursday" scores 0.8 on bag-of-words overlap despite "due" appearing
+#: nowhere. That is exactly the hallucination this check exists to catch.
+MIN_CONTIGUOUS_TOKENS = 4
+
+#: Cap on source length considered, to bound the O(n*m) diff on long threads.
+_MAX_SOURCE_TOKENS = 6000
+
+
+def _sequence_match(quote: str, source: str) -> tuple[int, float]:
+    """Longest run of consecutive matching tokens, and the in-order match ratio.
+
+    Returns (longest_contiguous_run, fraction_of_quote_matched_in_order).
+    Both must be satisfied: the ratio alone permits scattered words, and the
+    run alone permits a short coincidental phrase.
+    """
     q_tokens = [t for t in _normalise(quote).split(" ") if t]
-    if not q_tokens:
-        return 0.0
-    s_tokens = set(_normalise(source).split(" "))
-    return sum(1 for t in q_tokens if t in s_tokens) / len(q_tokens)
+    s_tokens = [t for t in _normalise(source).split(" ") if t][:_MAX_SOURCE_TOKENS]
+    if not q_tokens or not s_tokens:
+        return 0, 0.0
+
+    # autojunk=False: the heuristic treats frequent elements as noise, which on
+    # natural language means discarding exactly the common words that make a
+    # quote a quote.
+    matcher = SequenceMatcher(None, q_tokens, s_tokens, autojunk=False)
+    blocks = matcher.get_matching_blocks()
+    longest = max((b.size for b in blocks), default=0)
+    matched = sum(b.size for b in blocks)
+    return longest, matched / len(q_tokens)
 
 
 class GroundingResult(BaseModel):
@@ -241,16 +267,29 @@ def verify_grounding(
     if _normalise(quote) in _normalise(source_text):
         return GroundingResult(grounded=True, method="exact", overlap=1.0)
 
-    overlap = _token_overlap(quote, source_text)
-    if overlap >= min_overlap:
-        return GroundingResult(grounded=True, method="fuzzy", overlap=round(overlap, 3))
+    longest, overlap = _sequence_match(quote, source_text)
+    required_run = min(MIN_CONTIGUOUS_TOKENS, len(tokens))
 
-    return GroundingResult(
-        grounded=False,
-        method="none",
-        overlap=round(overlap, 3),
-        reason=f"only {overlap:.0%} of the quote appears in the message",
-    )
+    if longest < required_run:
+        return GroundingResult(
+            grounded=False,
+            method="none",
+            overlap=round(overlap, 3),
+            reason=(
+                f"words appear in the message but never together — longest matching "
+                f"run is {longest} token(s), need {required_run}"
+            ),
+        )
+
+    if overlap < min_overlap:
+        return GroundingResult(
+            grounded=False,
+            method="none",
+            overlap=round(overlap, 3),
+            reason=f"only {overlap:.0%} of the quote appears in the message",
+        )
+
+    return GroundingResult(grounded=True, method="fuzzy", overlap=round(overlap, 3))
 
 
 # --------------------------------------------------------------------------
