@@ -283,9 +283,7 @@ async def ingest_message(
 
     thread = await upsert_thread(session, source_id=source_id, parsed=parsed)
 
-    message = Message(
-        source_id=source_id,
-        source_message_id=parsed.source_message_id,
+    fields = dict(
         rfc_message_id=parsed.rfc_message_id or None,
         thread_id=thread.id,
         in_reply_to=parsed.in_reply_to or None,
@@ -313,8 +311,31 @@ async def ingest_message(
         content_hash=parsed.content_hash,
         list_id=parsed.list_id[:300] or None,
     )
-    session.add(message)
-    return message
+
+    # Atomic insert-or-skip, not a bare add(): the select above covers the
+    # ordinary case, but a manual "check now" and the worker's own poll tick
+    # can both be mid-sync for the same source at once, each on its own
+    # session — both would see no existing row for a brand-new message, and
+    # a plain add() would have the second commit die on the
+    # (source_id, source_message_id) unique constraint the module docstring
+    # promises is impossible. `on_conflict_do_nothing` rather than do_update:
+    # a conflict here means another writer just inserted the same immutable
+    # Gmail message a moment ago, not a genuine edit to reconcile.
+    await session.execute(
+        sqlite_insert(Message)
+        .values(source_id=source_id, source_message_id=parsed.source_message_id, **fields)
+        .on_conflict_do_nothing(index_elements=["source_id", "source_message_id"])
+    )
+    # Re-fetch regardless of which writer's insert actually landed — either
+    # way the row now exists, and the caller only needs a real Message back.
+    return (
+        await session.execute(
+            select(Message).where(
+                Message.source_id == source_id,
+                Message.source_message_id == parsed.source_message_id,
+            )
+        )
+    ).scalar_one()
 
 
 # ---------------------------------------------------------------------------

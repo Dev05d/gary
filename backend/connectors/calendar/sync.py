@@ -110,6 +110,12 @@ def normalize_attendees(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def organizer_email(event: Dict[str, Any]) -> Optional[str]:
+    organizer = event.get("organizer") or {}
+    email = organizer.get("email")
+    return email or None
+
+
 # ---------------------------------------------------------------------------
 # Upsert
 # ---------------------------------------------------------------------------
@@ -151,6 +157,23 @@ async def upsert_event(
         except ValueError:
             updated_remote = None
 
+    organizer_identity_id = None
+    organizer = organizer_email(raw)
+    if organizer:
+        # Reuses Gmail's identity upsert rather than a parallel one: an
+        # organizer is identified the same way a sender is — by email — and
+        # having two code paths normalise and dedupe addresses differently
+        # would be its own source of split identities.
+        from backend.connectors.gmail.sync import upsert_identity
+
+        identity = await upsert_identity(
+            session,
+            address=organizer,
+            display_name=(raw.get("organizer") or {}).get("displayName", ""),
+            seen_at=starts_at,
+        )
+        organizer_identity_id = identity.id if identity else None
+
     fields = dict(
         calendar_id=calendar_id,
         ical_uid=raw.get("iCalUID"),
@@ -164,6 +187,7 @@ async def upsert_event(
         all_day=all_day,
         local_date=local_date,
         timezone_name=tz_name,
+        organizer_identity_id=organizer_identity_id,
         attendees=normalize_attendees(raw),
         my_response=my_response_from(raw),
         status=raw.get("status", "confirmed"),
@@ -172,16 +196,34 @@ async def upsert_event(
         deleted_at=None,
     )
 
-    if existing is not None:
-        for key, value in fields.items():
-            setattr(existing, key, value)
-        return existing, "updated"
-
-    event = CalendarEvent(
-        id=new_id(), source_id=source_id, source_event_id=event_id, **fields
+    # Atomic upsert, not select-then-write: a manual "check now" and the
+    # worker's own poll tick can both be mid-sync for the same source at
+    # once, each on its own session. Both would see no existing row for a
+    # brand-new event, both would INSERT, and the second would die on the
+    # (source_id, source_event_id) unique constraint — proved concretely by
+    # racing two sessions through this exact function before this fix existed.
+    # `existing`, captured above, is used only to label the outcome as
+    # created vs. updated for the sync summary; in the narrow window where
+    # two writers genuinely race, that label can end up cosmetically wrong
+    # (report "created" for what became an update-via-conflict), which is
+    # harmless — the stored row itself is always correct either way.
+    stmt = (
+        sqlite_insert(CalendarEvent)
+        .values(id=new_id(), source_id=source_id, source_event_id=event_id, **fields)
+        .on_conflict_do_update(
+            index_elements=["source_id", "source_event_id"], set_=fields
+        )
     )
-    session.add(event)
-    return event, "created"
+    await session.execute(stmt)
+    event = (
+        await session.execute(
+            select(CalendarEvent).where(
+                CalendarEvent.source_id == source_id,
+                CalendarEvent.source_event_id == event_id,
+            )
+        )
+    ).scalar_one()
+    return event, ("updated" if existing is not None else "created")
 
 
 # ---------------------------------------------------------------------------
@@ -276,14 +318,28 @@ async def upcoming_events(
 
     An indexed range scan, which is the entire reason instances are expanded
     at ingest rather than evaluated from a recurrence rule at query time.
+
+    This is an **overlap** test (`starts_at < end AND ends_at > start`), not a
+    "starts inside the window" test. The difference matters for anything
+    longer than a point event: a 3-day conference has `starts_at` on day one,
+    so a query for day two of it must still match on `ends_at`, or it silently
+    vanishes from every day but the first — the "what do I have tomorrow"
+    answer would be wrong precisely when the answer matters most (you're
+    already at the multi-day thing). An event with no parseable `ends_at`
+    (Google sent something malformed or omitted it) falls back to the old
+    starts-in-range test, since a duration of unknown length cannot overlap
+    anything by the general rule.
     """
     stmt = (
         select(CalendarEvent)
         .where(
             CalendarEvent.deleted_at.is_(None),
             CalendarEvent.status != "cancelled",
-            CalendarEvent.starts_at >= start,
             CalendarEvent.starts_at < end,
+            (
+                (CalendarEvent.ends_at.is_(None) & (CalendarEvent.starts_at >= start))
+                | (CalendarEvent.ends_at.isnot(None) & (CalendarEvent.ends_at > start))
+            ),
         )
         .order_by(CalendarEvent.starts_at)
     )

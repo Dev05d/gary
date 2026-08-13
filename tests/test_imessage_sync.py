@@ -7,6 +7,7 @@ failures worth catching here are all in the reading.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,7 @@ from backend.database.models import (
     Source,
     SyncState,
 )
+from backend.database.session import get_sessionmaker
 from tests.fake_imessage import (
     FakeChatDB,
     build_sample_db,
@@ -442,3 +444,195 @@ async def test_healthy_corpus_raises_no_warning(session, source, sample_db):
     outcome = await ingest_batch(session, source_id=source.id, messages=list(read_messages(conn)))
     assert outcome.coverage_warning is None
     assert outcome.text_coverage == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Sessions across ingestion batches — the normal case, not an edge case
+# ---------------------------------------------------------------------------
+#
+# The default poll interval is 30 seconds; the default session gap is 30
+# minutes. Any live back-and-forth that outlasts one poll tick — which is
+# most conversations, since people do not reply within 30 seconds of every
+# message — is split across at least two `ingest_batch` calls. Building
+# sessions purely from what is in the *current* batch, blind to what the
+# chat's most recent session already holds, turns one real conversation into
+# several small ones for no reason but when the connector happened to look.
+
+async def test_a_conversation_split_across_two_ticks_is_one_session(session, source):
+    tick1 = [_msg(1, "you free thursday?", 0), _msg(2, "yeah 7pm works", 0.33)]
+    await ingest_batch(session, source_id=source.id, messages=tick1)
+    await session.commit()
+
+    tick2 = [_msg(3, "see you then", 0.66)]  # 20s after the first tick's last message
+    await ingest_batch(session, source_id=source.id, messages=tick2)
+    await session.commit()
+
+    sessions = (await session.execute(select(ChatSession))).scalars().all()
+    assert len(sessions) == 1, "one continuous conversation must not fragment across ticks"
+    assert sessions[0].message_count == 3
+    assert "you free thursday?" in sessions[0].transcript
+    assert "see you then" in sessions[0].transcript
+
+
+async def test_a_real_gap_after_a_tick_still_starts_a_new_session(session, source):
+    """The fix must not glue every message in a chat into one giant session —
+    only continue across a tick boundary when the real-world gap is small."""
+    tick1 = [_msg(1, "you free thursday?", 0)]
+    await ingest_batch(session, source_id=source.id, messages=tick1)
+    await session.commit()
+
+    tick2 = [_msg(2, "hey, sorry, missed this — still on?", 45)]  # 45 min later
+    await ingest_batch(session, source_id=source.id, messages=tick2)
+    await session.commit()
+
+    sessions = (
+        await session.execute(select(ChatSession).order_by(ChatSession.started_at))
+    ).scalars().all()
+    assert len(sessions) == 2
+    assert [s.message_count for s in sessions] == [1, 1]
+
+
+async def test_extension_updates_the_session_boundaries_and_invalidates_summary(session, source):
+    tick1 = [_msg(1, "hey", 0)]
+    await ingest_batch(session, source_id=source.id, messages=tick1)
+    await session.commit()
+
+    first = (await session.execute(select(ChatSession))).scalar_one()
+    first.summary = "a stale, already-generated summary"
+    await session.commit()
+
+    tick2 = [_msg(2, "you around?", 1)]
+    await ingest_batch(session, source_id=source.id, messages=tick2)
+    await session.commit()
+
+    await session.refresh(first)
+    assert first.message_count == 2
+    assert first.ended_at.replace(tzinfo=timezone.utc) == _msg(2, "", 1).sent_at
+    assert first.summary is None, "a summary of the old, shorter transcript is now wrong"
+
+
+async def test_three_ticks_of_one_conversation_still_produce_one_session(session, source):
+    for i, (text, minutes) in enumerate([
+        ("first", 0), ("second", 0.4), ("third", 0.9), ("fourth", 1.5), ("fifth", 2.1)
+    ], start=1):
+        await ingest_batch(session, source_id=source.id, messages=[_msg(i, text, minutes)])
+        await session.commit()
+
+    sessions = (await session.execute(select(ChatSession))).scalars().all()
+    assert len(sessions) == 1
+    assert sessions[0].message_count == 5
+    for text in ("first", "second", "third", "fourth", "fifth"):
+        assert text in sessions[0].transcript
+
+
+async def test_extension_never_moves_ended_at_backwards(session, source):
+    """iCloud sync can deliver an older message after a newer one has already
+    been ingested. Extending with it must not un-advance the session's end."""
+    tick1 = [_msg(1, "later message", 10)]
+    await ingest_batch(session, source_id=source.id, messages=tick1)
+    await session.commit()
+
+    session_row = (await session.execute(select(ChatSession))).scalar_one()
+    original_ended_at = session_row.ended_at
+
+    tick2 = [_msg(2, "an earlier message, arriving late", 8)]
+    await ingest_batch(session, source_id=source.id, messages=tick2)
+    await session.commit()
+
+    await session.refresh(session_row)
+    assert session_row.ended_at.replace(tzinfo=timezone.utc) >= original_ended_at.replace(
+        tzinfo=timezone.utc
+    )
+
+
+async def test_a_much_older_stray_message_does_not_extend_a_recent_session(session, source):
+    """A message delivered wildly out of order (hours earlier than the
+    session it would otherwise be compared against) must not merge into it —
+    the gap check has to be symmetric, not just 'is the new one later'."""
+    tick1 = [_msg(1, "recent activity", 100)]
+    await ingest_batch(session, source_id=source.id, messages=tick1)
+    await session.commit()
+
+    # A message from 3 hours before that session's only entry — e.g. a
+    # backfilled or delayed row.
+    tick2 = [_msg(2, "a message from ages ago", 100 - 180)]
+    await ingest_batch(session, source_id=source.id, messages=tick2)
+    await session.commit()
+
+    sessions = (await session.execute(select(ChatSession))).scalars().all()
+    assert len(sessions) == 2, "a 3-hour-distant message must start its own session"
+
+
+async def test_extension_stops_at_the_message_count_cap(session, source):
+    """A session that never goes quiet for `gap_minutes` must not grow its
+    transcript without bound."""
+    from backend.connectors.imessage.sync import MAX_SESSION_MESSAGES
+
+    rowid = 1
+    minute = 0.0
+    for _ in range(MAX_SESSION_MESSAGES + 5):
+        await ingest_batch(
+            session, source_id=source.id, messages=[_msg(rowid, f"msg{rowid}", minute)]
+        )
+        await session.commit()
+        rowid += 1
+        minute += 0.1  # well within the gap every time
+
+    sessions = (
+        await session.execute(select(ChatSession).order_by(ChatSession.started_at))
+    ).scalars().all()
+    assert len(sessions) == 2, "the cap must force a second session rather than growing forever"
+    assert sessions[0].message_count == MAX_SESSION_MESSAGES
+    assert sessions[1].message_count == 5
+
+
+# ---------------------------------------------------------------------------
+# ChatMessage concurrency — two overlapping syncs of the same source
+# ---------------------------------------------------------------------------
+
+async def test_concurrent_ingestion_of_the_same_new_row_does_not_crash(session, source):
+    """A manual 'check now' and the worker's own poll tick can both be
+    mid-sync at once, each on its own session, each reading the chat.db
+    watermark before the other has advanced it — so both can observe the same
+    'new' row. Structured as independent begin/work/commit units, matching
+    how two real overlapping syncs behave, rather than two sessions sharing
+    one still-open transaction (which deadlocks on SQLite's writer lock
+    regardless of whether the upsert logic is correct)."""
+    sm = get_sessionmaker()
+    raw = [_msg(1, "racing message", 0)]
+
+    async def _one():
+        async with sm() as s:
+            outcome = await ingest_batch(s, source_id=source.id, messages=raw)
+            await s.commit()
+            return outcome.ingested
+
+    ingested_counts = await asyncio.gather(*(_one() for _ in range(6)))
+    assert sum(ingested_counts) == 1, "exactly one of the racing writers should have won"
+
+    count = await session.scalar(
+        select(func.count()).select_from(ChatMessage).where(
+            ChatMessage.source_id == source.id, ChatMessage.source_rowid == 1
+        )
+    )
+    assert count == 1
+
+
+async def test_losing_the_race_does_not_inflate_the_chat_message_count(session, source):
+    """`upsert_chat` runs before the message insert (its id is the message's
+    foreign key, needed before either racing writer knows who will win) — so
+    naively bumping `message_count` there would count once per *attempt*, not
+    once per row actually stored. Six racing attempts at one new message must
+    still leave the chat's count at 1, not 6."""
+    sm = get_sessionmaker()
+    raw = [_msg(1, "racing message", 0)]
+
+    async def _one():
+        async with sm() as s:
+            await ingest_batch(s, source_id=source.id, messages=raw)
+            await s.commit()
+
+    await asyncio.gather(*(_one() for _ in range(6)))
+
+    chat = (await session.execute(select(Chat).where(Chat.source_id == source.id))).scalar_one()
+    assert chat.message_count == 1, "the race's losers must not each add a phantom count"

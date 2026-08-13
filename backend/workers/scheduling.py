@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import SyncState, utcnow
@@ -44,21 +45,37 @@ async def record_failure(session: AsyncSession, *, source_id: str, error: str) -
     lookup that silently drops the very first failure a source ever has —
     which would otherwise leave `last_error` empty and the Sources panel
     reporting a connected-looking source that has in fact never synced.
+
+    Atomic upsert with a SQL-level increment, not get-then-add: two syncs of
+    the same source can fail at once (a manual "check now" and the worker's
+    own tick, both hitting the same dead credential), and if neither has ever
+    succeeded, both see no `SyncState` row and both would try to create it —
+    `source_id` is the primary key, so the second would crash rather than
+    just lose a race. Unlike the read-side upserts elsewhere in the workers,
+    a conflict here must not be dropped with `DO NOTHING`: the two failures
+    are genuinely different events (different error messages, both worth
+    recording), so the increment has to happen in SQL rather than be computed
+    from a Python-side read that would be stale by the time either write lands.
     """
-    state = await session.get(SyncState, source_id)
     now = utcnow()
-    if state is None:
-        session.add(
-            SyncState(
-                source_id=source_id,
-                watermark={},
+    stmt = (
+        sqlite_insert(SyncState)
+        .values(
+            source_id=source_id,
+            watermark={},
+            last_attempt_at=now,
+            last_error=error[:1000],
+            consecutive_failures=1,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=["source_id"],
+            set_=dict(
                 last_attempt_at=now,
                 last_error=error[:1000],
-                consecutive_failures=1,
+                consecutive_failures=SyncState.consecutive_failures + 1,
                 updated_at=now,
-            )
+            ),
         )
-    else:
-        state.last_attempt_at = now
-        state.last_error = error[:1000]
-        state.consecutive_failures = (state.consecutive_failures or 0) + 1
+    )
+    await session.execute(stmt)

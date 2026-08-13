@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import secrets
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from backend.connectors.gmail import oauth
 from backend.database.models import OAuthCredential, Source, SyncState
 from backend.security.crypto import Cipher, generate_key, reset_cipher
 
@@ -263,3 +266,107 @@ async def test_disconnect_removes_the_credential(client, session):
     await session.refresh(source)
     assert source.status == "disconnected"
     assert source.enabled is False
+
+
+# ===========================================================================
+# Concurrent callbacks — two tabs finishing the same consent flow
+# ===========================================================================
+
+def _fake_bundle(account: str) -> oauth.TokenBundle:
+    return oauth.TokenBundle(
+        access_token="fake-access",
+        refresh_token="fake-refresh",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        account_email=account,
+    )
+
+
+def _seed_pending(client) -> str:
+    """A valid in-flight auth attempt, as if the user had just clicked Connect."""
+    pending = oauth.new_pending_auth()
+    client.app.state.pending_auth[pending.state] = pending
+    return pending.state
+
+
+async def test_two_tabs_completing_the_same_consent_do_not_crash(
+    client, session, monkeypatch
+):
+    """A user who opens 'Connect a Google account' twice — a slow first tab
+    retried, or a genuine double-click — and completes both ends up with one
+    gmail source and one gcal source, not a 500 from a unique-constraint
+    violation.
+
+    Both callbacks resolve to the *same* Google account: that account is what
+    ties the race together, not the (harmless, single-use) `state` values,
+    which are already distinct per tab by construction.
+    """
+    configure_google(client)
+
+    async def _fake_exchange(**_kwargs):
+        return _fake_bundle("me@example.com")
+
+    monkeypatch.setattr(oauth, "exchange_code", _fake_exchange)
+
+    state_a, state_b = _seed_pending(client), _seed_pending(client)
+    responses = await asyncio.gather(
+        client.get(f"/api/auth/google/callback?code=codeA&state={state_a}"),
+        client.get(f"/api/auth/google/callback?code=codeB&state={state_b}"),
+    )
+    assert all(r.status_code == 200 for r in responses)
+
+    for kind in ("gmail", "gcal"):
+        count = await session.scalar(
+            select(func.count()).select_from(Source).where(
+                Source.kind == kind, Source.account_identifier == "me@example.com"
+            )
+        )
+        assert count == 1, f"{kind}: two tabs created {count} sources instead of one"
+
+    cred_count = await session.scalar(
+        select(func.count()).select_from(OAuthCredential).where(
+            OAuthCredential.account_email == "me@example.com"
+        )
+    )
+    assert cred_count == 1
+
+
+async def test_reconnecting_the_same_account_refreshes_the_token_not_duplicates_it(
+    client, session, monkeypatch
+):
+    """A stricter sequential version of the race above: connect, then connect
+    again (a real re-auth, not a race) — the token must be replaced in place."""
+    configure_google(client)
+
+    async def _first_bundle(**_kwargs):
+        return _fake_bundle("me@example.com")
+
+    monkeypatch.setattr(oauth, "exchange_code", _first_bundle)
+    state1 = _seed_pending(client)
+    await client.get(f"/api/auth/google/callback?code=c1&state={state1}")
+
+    cipher = Cipher.from_settings(client.app.state.settings.credential_encryption_key)
+    first_credential = (await session.execute(select(OAuthCredential))).scalar_one()
+    first_token = cipher.decrypt(first_credential.encrypted_token, aad="me@example.com")
+    assert first_token == "fake-refresh"
+
+    async def _second_bundle(**_):
+        return oauth.TokenBundle(
+            access_token="fake-access-2",
+            refresh_token="rotated-refresh",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+            account_email="me@example.com",
+        )
+
+    monkeypatch.setattr(oauth, "exchange_code", _second_bundle)
+    state2 = _seed_pending(client)
+    r = await client.get(f"/api/auth/google/callback?code=c2&state={state2}")
+    assert r.status_code == 200
+
+    await session.refresh(first_credential)
+    rotated_token = cipher.decrypt(first_credential.encrypted_token, aad="me@example.com")
+    assert rotated_token == "rotated-refresh", "reconnecting must overwrite the stored token"
+
+    count = await session.scalar(select(func.count()).select_from(OAuthCredential))
+    assert count == 1, "reconnecting must not create a second credential row"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -20,6 +21,7 @@ from backend.connectors.gmail.sync import (
     sync_once,
 )
 from backend.database.models import Identity, Message, MessageThread, Source, SyncState
+from backend.database.session import get_sessionmaker
 from backend.pipeline.label_policy import LabelPolicy
 from tests.fake_gmail import FakeGmail, build_raw_message
 
@@ -431,3 +433,41 @@ async def test_label_change_updates_rather_than_duplicates(session, source, gmai
         await session.execute(select(Message).where(Message.source_message_id == "lbl1"))
     ).scalar_one()
     assert "STARRED" in msg.labels
+
+
+# ===========================================================================
+# Concurrency — a manual "check now" overlapping the worker's own poll tick
+# ===========================================================================
+
+async def test_concurrent_ingestion_of_the_same_new_message_does_not_crash(session, source):
+    """The module docstring promises ingest is idempotent because
+    `(source_id, source_message_id)` is unique — true for a sequential
+    crash-and-retry, but a plain select-then-add is still a check-then-act
+    race for two *concurrent* syncs of the same source (a manual "check now"
+    landing while the worker's own tick is mid-flight). Each opens its own
+    session; both can see no existing row for the same brand-new message.
+
+    Structured as independent begin/work/commit units — matching how two
+    real overlapping syncs behave — rather than two sessions sharing one
+    still-open transaction, which deadlocks on SQLite's own writer lock
+    regardless of whether the upsert logic underneath is correct.
+    """
+    sm = get_sessionmaker()
+    raw = build_raw_message(message_id="racing-msg", subject="Race")
+
+    async def _one():
+        async with sm() as s:
+            stored = await ingest_message(
+                s, source_id=source.id, raw=raw, policy=POLICY, my_addresses=MY
+            )
+            await s.commit()
+            return stored.id if stored else None
+
+    ids = await asyncio.gather(*(_one() for _ in range(8)))
+    assert all(i is not None for i in ids)
+    assert len(set(ids)) == 1, "eight racing ingests of the same message must converge on one row"
+
+    count = await session.scalar(
+        select(func.count()).select_from(Message).where(Message.source_message_id == "racing-msg")
+    )
+    assert count == 1

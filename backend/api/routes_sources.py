@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.connectors.gmail import oauth
@@ -22,6 +23,7 @@ from backend.database.models import (
     OAuthCredential,
     Source,
     SyncState,
+    new_id,
     utcnow,
 )
 from backend.database.session import get_session
@@ -229,23 +231,49 @@ async def google_callback(
         return _callback_page("Could not store the credential", str(exc), False)
 
     for kind, label in (("gmail", "Gmail"), ("gcal", "Google Calendar")):
+        # Atomic upsert, not select-then-insert: two tabs completing the same
+        # consent flow (or a slow first attempt retried) can both reach this
+        # callback for the same account. Both would see no row, both would
+        # INSERT, and the second would die on the (kind, account_identifier)
+        # unique constraint — the same class of race already guarded against
+        # in gmail.sync.upsert_identity and the settings service.
+        await session.execute(
+            sqlite_insert(Source)
+            .values(
+                id=new_id(),
+                kind=kind,
+                account_identifier=account,
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            .on_conflict_do_nothing(index_elements=["kind", "account_identifier"])
+        )
         source = (
             await session.execute(
                 select(Source).where(
                     Source.kind == kind, Source.account_identifier == account
                 )
             )
-        ).scalar_one_or_none()
-        if source is None:
-            source = Source(kind=kind, account_identifier=account)
-            session.add(source)
-            await session.flush()
+        ).scalar_one()
         source.display_name = f"{label} ({account})"
         source.status = "connected"
         source.enabled = True
         source.last_error = None
 
         if kind == "gmail":
+            await session.execute(
+                sqlite_insert(OAuthCredential)
+                .values(
+                    id=new_id(),
+                    source_id=source.id,
+                    provider="google",
+                    account_email=account,
+                    encrypted_token=blob,
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
+                )
+                .on_conflict_do_nothing(index_elements=["provider", "account_email"])
+            )
             credential = (
                 await session.execute(
                     select(OAuthCredential).where(
@@ -253,12 +281,10 @@ async def google_callback(
                         OAuthCredential.account_email == account,
                     )
                 )
-            ).scalar_one_or_none()
-            if credential is None:
-                credential = OAuthCredential(
-                    source_id=source.id, provider="google", account_email=account
-                )
-                session.add(credential)
+            ).scalar_one()
+            # Refreshed unconditionally, whether the row above was just
+            # created or already existed — a re-auth must overwrite the
+            # stored token either way.
             credential.source_id = source.id
             credential.encrypted_token = blob
             credential.scopes = bundle.scopes

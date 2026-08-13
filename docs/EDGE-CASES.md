@@ -1039,3 +1039,152 @@ Five are already implemented and tested: the data horizon
 (`backend/pipeline/identity.py`), LLM triage with audit sampling
 (`backend/pipeline/triage.py`), and behavioural importance
 (`backend/pipeline/importance.py`).
+
+---
+
+## 15. Found by testing, not by reading (round 4)
+
+§12.3 flagged this at Milestone 2: *"every read-modify-write against shared
+state in this codebase is suspect... the same pattern to audit at Milestone 2:
+sync watermark updates, identity upserts, and commitment reconciliation."* This
+round is that audit, run once Calendar and iMessage actually landed and there
+were three more workers' worth of read-modify-write to check.
+
+### 15.1 ⚠⚠ The check-then-act race, six more places
+A systematic grep for `select(...).scalar_one_or_none()` followed by a
+conditional `session.add(...)` found the same shape §12.3 fixed once for
+settings, unfixed in six more places — all of them reachable in practice
+because a manual "check now" in the Sources panel and a source's own poll
+tick both call the exact same sync function, on independent sessions, and
+nothing serialises them:
+
+| Where | What raced | Found by |
+|---|---|---|
+| `imessage_worker.ensure_source` | Two clicks of "Enable iMessage" both creating the singleton source row | Two sessions, interleaved by hand: both `SELECT`, then both `INSERT` |
+| `routes_sources.google_callback` | Two consent-flow tabs for the same account, both creating `Source` and `OAuthCredential` | Two real HTTP requests via `asyncio.gather`, monkeypatched token exchange |
+| `calendar.sync.upsert_event` | A manual sync and the worker's tick both inserting the same new event | Two sessions calling `upsert_event` sequentially without committing between them |
+| `imessage.sync.ingest_batch` (`ChatMessage`) | Same shape, for a new iMessage row | `asyncio.gather` over 6 independent begin/work/commit cycles |
+| `gmail.sync.ingest_message` (`Message`) | Same shape, for a new Gmail message — the exact case the module's own docstring claims is impossible | `asyncio.gather` over 8 independent begin/work/commit cycles |
+| `scheduling.record_failure` | Two syncs of a source that has *never* succeeded, both creating its first `SyncState` row (`source_id` is the primary key here, not a secondary unique index) | `asyncio.gather` over 6 independent begin/work/commit cycles |
+
+Blind `asyncio.gather` over the naive code did not reliably reproduce the
+first one — SQLite resolved 20 concurrent tasks too quickly, one after
+another, for the window to open in that run. It only became provably real
+once two sessions were interleaved by hand: both made to finish their
+`SELECT` before either issued its `INSERT`. The other five reproduced under
+ordinary `asyncio.gather`, given the one detail that makes the harness
+meaningful rather than accidentally safe: **each racing unit of work must
+commit inside its own task.** An early version of this test held two
+sessions open across an outer `gather` and deferred both commits to after
+it — which deadlocks on SQLite's own writer lock regardless of whether the
+upsert underneath is correct, and proves nothing either way.
+
+Five of the six crashed outright — `IntegrityError: UNIQUE constraint
+failed`. The sixth (`record_failure`) did not crash, which is worse in one
+respect: it silently *undercounted*, losing failures rather than raising on
+them. Six racing first-failures should leave `consecutive_failures == 6`;
+the naive code left it at 2, with no error to say four of them went missing.
+
+**Fix:** the same atomic upsert as §12.3, applied everywhere the table above
+lists. Two different conflict policies, chosen by what a conflict actually
+means: `ON CONFLICT DO NOTHING` where the losing writer's data is a
+redundant observation of the same source row (all five insert cases — a
+`rowcount` of 0 tells the caller it lost, so bookkeeping like `outcome.ingested`
+isn't double-counted for a row it didn't add); `ON CONFLICT DO UPDATE` with a
+SQL-level increment where the losing writer's data is genuinely different
+information that must not be dropped (`record_failure` — two different error
+messages are two different events, and computing the increment in Python from
+a pre-write read would just move the race into the read).
+
+**Generalised lesson, sharpened from §12.3's:** the pattern recurs because the
+*shape* of a connector — get-or-create the parent row, then insert the child
+row that references it — is the same across Gmail, Calendar, and iMessage,
+so a gap fixed once in `gmail.sync.upsert_identity` did not propagate to its
+siblings by osmosis. Two related traps worth naming so they don't recur a
+seventh time:
+
+  1. **A dependent side effect can still be wrong even after the crash is
+     fixed.** `ingest_batch` calls `upsert_chat` *before* the racy insert,
+     because the chat's id is the insert's own foreign key — so every racing
+     attempt, including the five that lose, unconditionally incremented
+     `Chat.message_count`. Fixing the crash alone would have left the count
+     silently inflated by one per lost race, forever. The bookkeeping had to
+     be split out and moved after the insert, gated on `rowcount == 1`.
+  2. **Not every conflict should be resolved the same way.** `DO NOTHING`
+     resolves the five duplicate-observation cases correctly and would have
+     *silently dropped* a genuine second failure in `record_failure` — the
+     bug in that row is a different shape, and needs a different fix, not
+     the same one copy-pasted six times.
+
+### 15.2 ⚠⚠ Multi-day events invisible on every day but the first
+`upcoming_events` filtered on `starts_at >= start AND starts_at < end` — a
+"does it start in this window" test, not a "does it overlap this window"
+test. A one-hour meeting cannot tell the difference. A 3-day conference can:
+its `starts_at` is day one, so a query for day two or three found nothing.
+
+Confirmed directly: a 3-day conference stored via the real sync path,
+queried with `upcoming_events(start=<day 2>, end=<day 3>)`, returned `[]`.
+"What do I have tomorrow" is wrong for exactly the events where being wrong
+matters most — you are already at the multi-day thing, mid-way through it,
+and Gary would report a free day.
+
+**Fix:** a real interval-overlap test — `starts_at < end AND ends_at > start`
+— with a defined fallback for the one case a duration-based rule cannot
+answer: an event with no parseable `ends_at` (Google omitted it, or sent
+something malformed) falls back to the old starts-in-range rule, since a
+duration of unknown length cannot be said to overlap anything by the general
+rule. Verified on all five shapes: multi-day (visible on every day it
+spans), an overnight event straddling the query boundary (visible), a point
+event (unaffected — same behaviour as before), the open-interval boundary
+itself (an event ending exactly when the window starts is correctly
+excluded, not an off-by-one either direction), and the no-end-time fallback.
+
+### 15.3 ⚠⚠ Every live iMessage conversation was fragmented across poll ticks
+Sessions — the unit of meaning for a text conversation, and the reason 500
+messages a day becomes roughly 20 units of work instead of 500 — were built
+per *ingestion batch*, with no memory of what the previous batch already
+stored for the same chat.
+
+This reads like a rare batch-boundary edge case until the actual numbers are
+in: the default poll interval is 30 seconds, and the default session gap is
+30 minutes. Any conversation that outlasts one poll tick — which is nearly
+all of them, since people do not reply within 30 seconds of every message —
+was split across at least two `ingest_batch` calls, each blind to the
+other's session. This is not a rare shape. It is what happens to a normal
+back-and-forth every time, silently, from day one.
+
+Confirmed directly: a 3-message exchange sent 20–40 seconds apart, ingested
+across two ticks the way the poll loop actually delivers it, produced two
+`ChatSession` rows instead of one.
+
+**Fix:** before starting new sessions for a batch, check the chat's most
+recently started session. If it exists, has not already hit a size cap, and
+the new batch's first message arrives within the session gap of where that
+session left off, extend it in place — new transcript appended, `ended_at`
+advanced, `summary` cleared (a summary of the shorter, stale transcript must
+not survive being extended silently). Otherwise, start fresh, exactly as
+before.
+
+Two details the fix had to get right or it would have traded one bug for
+another:
+
+  - **The gap check must be symmetric.** iCloud sync can deliver an older
+    message after a newer one has already been ingested (documented already
+    at §1's ROWID-vs-time-order note, and it applies here too). A signed
+    check — "is the new message later than the session's end, within the
+    gap" — would treat a message from *hours* before the session as "close",
+    because a large negative gap still satisfies `<= gap`. The check compares
+    `abs(gap)`, and extension only ever moves `started_at` earlier or
+    `ended_at` later, never the reverse.
+  - **Extension needs a ceiling.** Without one, a chat that never goes quiet
+    for the full gap window would grow one row's transcript without bound —
+    exactly the kind of row that is fine until the day it is fed to a
+    summariser or embedder and is suddenly too large to be one unit.
+    `MAX_SESSION_MESSAGES` forces a fresh session once the open one is full,
+    even if the gap would otherwise allow continuing it.
+
+**Generalised lesson:** "does this work" was answered by unit-testing
+`group_into_sessions` on one batch in isolation, and that answer was true and
+irrelevant — the function was correct, the assumption feeding it (a batch is
+a conversation) was not. The bug was invisible to any test that didn't first
+ask what a *poll loop*, not a single call, actually delivers over time.

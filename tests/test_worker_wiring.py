@@ -11,13 +11,17 @@ here and in `test_gmail_sync.py` / `test_calendar_sync.py` /
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import func, select
 
 from backend.database.models import Source, SyncState, utcnow
+from backend.database.session import get_sessionmaker
 from backend.workers import dispatch
+from backend.workers.imessage_worker import ensure_source
 from backend.workers.scheduling import due, record_failure
 from tests.fake_imessage import build_sample_db
 
@@ -106,6 +110,25 @@ async def test_record_failure_truncates_a_very_long_error(session, a_source):
     assert len(state.last_error) == 1000
 
 
+async def test_concurrent_first_failures_do_not_crash_and_all_count(session, a_source):
+    """`source_id` is `SyncState`'s primary key. Two syncs of a source that
+    has never succeeded — a manual "check now" and the worker's own tick,
+    both hitting the same dead credential — can both find no row and both
+    try to create it. The second must not crash on the primary-key conflict,
+    and its failure must still be counted, not silently dropped."""
+    sm = get_sessionmaker()
+
+    async def _one(n: int) -> None:
+        async with sm() as s:
+            await record_failure(s, source_id=a_source.id, error=f"failure {n}")
+            await s.commit()
+
+    await asyncio.gather(*(_one(n) for n in range(6)))
+
+    state = await session.get(SyncState, a_source.id)
+    assert state.consecutive_failures == 6, "a dropped conflict would undercount"
+
+
 # ===========================================================================
 # dispatch — routing a Source to the worker that knows how to sync it
 # ===========================================================================
@@ -148,6 +171,66 @@ async def test_dispatch_reports_unimplemented_kinds_without_guessing(session, se
     outcome, error = await dispatch.sync_source(session, source=source, settings=settings)
     assert outcome is None
     assert "not implemented" in (error or "")
+
+
+# ===========================================================================
+# ensure_source — the iMessage singleton-row race
+#
+# There is no OAuth callback creating this row once, in one request, the way
+# Gmail and Calendar get theirs. It is created lazily by whichever caller
+# reaches it first: the worker's own poll tick, or a user clicking "Enable
+# iMessage" (possibly a double-click — two requests, two sessions, the same
+# row). A plain select-then-insert is a check-then-act race there, the same
+# class of bug already fixed once for the settings service and for
+# gmail.sync.upsert_identity.
+#
+# A blind `asyncio.gather` over the old code did NOT reliably reproduce the
+# crash — SQLite resolved the two tasks too quickly, one after the other, for
+# the window to open in practice. The bug was only provably real once two
+# sessions were interleaved by hand: both issuing their SELECT before either
+# issued its INSERT. That is the shape kept below, in spirit — proving the
+# *fixed* code stays correct under both a strictly sequential caller (the row
+# already exists) and realistic concurrent callers (each on its own
+# begin/work/commit cycle, which is what real HTTP requests and poll ticks
+# actually do — a naive gather over UNcommitted work deadlocks against
+# SQLite's own writer lock regardless of whether the upsert is correct, which
+# is a fact about the test shape, not about ensure_source).
+# ===========================================================================
+
+async def test_ensure_source_is_idempotent_once_the_row_exists(client):
+    """The second caller must hit ON CONFLICT DO NOTHING, not a raw
+    IntegrityError, once the first has already committed the row."""
+    sm = get_sessionmaker()
+    async with sm() as s1:
+        first = await ensure_source(s1)
+        await s1.commit()
+
+    async with sm() as s2:
+        second = await ensure_source(s2)
+        await s2.commit()
+
+    assert first.id == second.id
+
+
+async def test_ensure_source_under_concurrent_callers_creates_one_row(client, session):
+    """Fifteen independent callers, each doing a full begin/work/commit cycle
+    concurrently — the shape of fifteen near-simultaneous "Enable iMessage"
+    clicks, or a double-click racing the worker's own tick."""
+    sm = get_sessionmaker()
+
+    async def _one() -> str:
+        async with sm() as s:
+            source = await ensure_source(s)
+            await s.commit()
+            return source.id
+
+    ids = await asyncio.gather(*(_one() for _ in range(15)))
+    assert len(set(ids)) == 1, f"concurrent callers created more than one row: {set(ids)}"
+
+    count = await session.scalar(
+        select(func.count()).select_from(Source).where(Source.kind == "imessage")
+    )
+    assert count == 1
 
 
 # ===========================================================================

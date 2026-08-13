@@ -290,12 +290,14 @@ moment it is switched on.
 - **Google Calendar sync** — windowed rather than watermarked, sync-token
   deltas within that window, recurring events expanded to instances at ingest
   so "what's on Tuesday" is an indexed range scan, cancellations kept as
-  tombstones rather than deleted
+  tombstones rather than deleted, a real interval-overlap query so a
+  multi-day event stays visible on every day it spans, not just the first
 - **iMessage sync** — reads a read-only copy of `chat.db` on this Mac,
   decodes the `attributedBody` typedstream archive modern macOS stores text
-  in, groups messages into conversation-burst sessions, routes tapbacks away
-  from the message stream, off by default and opt-in per the trust model
-  above
+  in, groups messages into conversation-burst sessions that survive being
+  split across poll ticks rather than fragmenting on every one, routes
+  tapbacks away from the message stream, off by default and opt-in per the
+  trust model above
 - **Structured facts plane** — messages, threads, identities, calendar
   events, chats and chat sessions, with the denormalised columns behind
   "who haven't I replied to"
@@ -305,6 +307,11 @@ moment it is switched on.
   settings on each poll tick rather than the values captured at boot, so a
   poll-interval change or flipping `imessage_enabled` takes effect within one
   tick, no restart
+- **Concurrency-safe ingestion** — a manual "check now" can genuinely overlap
+  a source's own poll tick; every insert a connector performs is an atomic
+  upsert rather than a check-then-act race, audited across all three
+  connectors and verified against real interleaved sessions, not just hoped
+  to hold under load
 - Streaming chat with your local model, over SSE
 - Conversation history persisted in SQLite
 - Two-model routing: **Deep** / **Fast** toggle in the UI
@@ -326,7 +333,7 @@ notifications, and the daily briefing. See the roadmap below.
 ## Testing it
 
 ```bash
-.venv/bin/python -m pytest              # 528 tests, no Ollama or accounts needed
+.venv/bin/python -m pytest              # 553 tests, no Ollama or accounts needed
 ```
 
 Manual smoke test:
@@ -447,7 +454,7 @@ backend/
   config.py     all configuration, one place
   main.py       app factory
 frontend/       React + Vite + TypeScript
-tests/          528 tests, mock connectors, no live accounts required
+tests/          553 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 

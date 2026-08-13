@@ -15,12 +15,13 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import Settings
 from backend.connectors.imessage.reader import IMessageUnavailable
 from backend.connectors.imessage.sync import IMessageSyncOutcome, sync_imessage_once
-from backend.database.models import Source, SyncState, utcnow
+from backend.database.models import Source, SyncState, new_id, utcnow
 from backend.database.session import session_scope
 from backend.events.bus import get_bus
 from backend.workers.scheduling import due, record_failure
@@ -42,26 +43,38 @@ async def ensure_source(session: AsyncSession) -> Source:
     poll tick after `imessage_enabled` is turned on — mirroring what
     `google_callback` does synchronously for Gmail/Calendar, just triggered by
     a setting instead of a redirect.
-    """
-    source = (
-        await session.execute(
-            select(Source).where(
-                Source.kind == "imessage", Source.account_identifier == ACCOUNT_IDENTIFIER
-            )
-        )
-    ).scalar_one_or_none()
 
-    if source is None:
-        source = Source(
+    Uses an atomic upsert rather than select-then-insert: the worker's own
+    poll tick and a user clicking "Enable iMessage" can both reach here for
+    the same (kind, account_identifier) pair, each on its own session, each
+    having just seen no row. A plain insert after that select is a
+    check-then-act race — proved concretely by interleaving two sessions by
+    hand rather than hoping `asyncio.gather` happens to catch it: both see no
+    row, the first commit succeeds, the second dies on the unique constraint.
+    Same class of bug as the settings service and `gmail.sync.upsert_identity`
+    already guard against.
+    """
+    await session.execute(
+        sqlite_insert(Source)
+        .values(
+            id=new_id(),
             kind="imessage",
             display_name="iMessage (this Mac)",
             account_identifier=ACCOUNT_IDENTIFIER,
             enabled=True,
             status="connecting",
         )
-        session.add(source)
-        await session.flush()
-    elif not source.enabled:
+        .on_conflict_do_nothing(index_elements=["kind", "account_identifier"])
+    )
+    source = (
+        await session.execute(
+            select(Source).where(
+                Source.kind == "imessage", Source.account_identifier == ACCOUNT_IDENTIFIER
+            )
+        )
+    ).scalar_one()
+
+    if not source.enabled:
         source.enabled = True
         source.status = "connecting"
         source.last_error = None
