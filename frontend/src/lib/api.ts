@@ -216,6 +216,10 @@ export const sourcesApi = {
       `/api/sources/${encodeURIComponent(id)}/disconnect`,
       { method: "POST" },
     ),
+  connectIMessage: () =>
+    request<{ connected: boolean; message: string }>("/api/sources/imessage/connect", {
+      method: "POST",
+    }),
 };
 
 // --------------------------------------------------------------- settings

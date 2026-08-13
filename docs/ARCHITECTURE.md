@@ -11,7 +11,11 @@ specification, and the data model that later milestones build out.
   facts and extracted commitments get real columns and real indexes.
 
 Scope for the next phase is deliberately narrow: **Gmail, Google Calendar, and
-iMessage.** Nothing else.
+iMessage.** Nothing else. All three are now implemented, ahead of the
+Milestone 3–5 work this document was originally written before — see
+`backend/connectors/{gmail,calendar,imessage}/` and `backend/workers/`. The
+design below was written before the code; it held up unchanged through
+implementation.
 
 Companions: [DATA-MODEL.md](DATA-MODEL.md) for storage and retrieval detail,
 [EDGE-CASES.md](EDGE-CASES.md) for the failure register.
@@ -681,17 +685,24 @@ unless explicitly opted in.
 | # | Milestone | Contents |
 |---|---|---|
 | 1 | Foundation ✅ | FastAPI + SQLite + Ollama + chat UI + settings |
-| 2 | Facts plane | Gmail OAuth, live watermark, polling, normalise + store. "What came in today?" |
+| 2 | Facts plane ✅ | Gmail OAuth, live watermark, polling, normalise + store. "What came in today?" |
 | 3 | Commitments plane | Clean, classify, extract, ground, reconcile. "What's due this week?" |
 | 4 | Semantic plane | FTS5 + chunking + embeddings + hybrid retrieval |
 | 5 | Agent | Query router + typed read-only tools over all three planes |
-| 6 | Calendar | Windowed sync, link events to commitments |
-| 7 | iMessage | Local read-only connector, session grouping |
+| 6 | Calendar ✅ | Windowed sync ✅. Linking events to commitments waits on Milestone 3. |
+| 7 | iMessage ✅ | Local read-only connector, session grouping |
 | 8 | Proactive | Notifications and the daily briefing |
 
 Milestone 2 is deliberately boring: get real mail into real rows, correctly and
 idempotently, with no LLM in the path. Everything else stacks on that being
 right.
+
+6 and 7 landed out of order, before 3–5: both are more connectors of the exact
+shape 2 already validated (OAuth or local file → watermark or window → normalise
+→ store), not new architecture, so there was nothing about them that depended on
+extraction or retrieval existing first. The part of 6 that *does* depend on
+Milestone 3 — resolving "am I free Tuesday, and does that clash with anything
+I've promised" — is still open.
 
 ---
 

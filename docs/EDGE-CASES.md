@@ -146,6 +146,21 @@ which path produced the text in `text_source` so coverage is measurable. Assert
 at startup: if >20% of recent messages yield no text, fail loudly rather than
 ingesting emptiness.
 
+**⚠ A second bug hides behind the first.** Once the archive parses at all, it
+still contains more than one string: the message text, *and* the attribute-run
+keys Messages.app writes alongside it, e.g. `__kIMMessagePartAttributeName` —
+29 characters. "Take the longest string in the archive" (a reasonable-looking
+shortcut once you're past the format problem) silently returns the attribute
+key instead of the message for anything shorter than 29 characters, which is
+most one-word replies. Found by round-tripping a synthetic archive built with a
+hand-written typedstream encoder (`tests/fake_imessage.py`) through the real
+reader — `extract_attributed_body(make_attributed_body("ok"))` returned
+`"__kIMMessagePartAttributeName"`, not `"ok"`. The correct rule is positional,
+not length-based: take the **first** `+`-encoded string value in the stream,
+not the longest one. A message body decoded from a photo-only message is also
+just Apple's object-replacement character (`￼`) and nothing else — that must
+resolve to no text, not to a one-character "message" that gets embedded.
+
 ### 2.2 NULL text that is *not* hidden text
 Photo- or attachment-only messages have `text IS NULL` **and**
 `attributedBody IS NULL`, with `cache_has_attachments = 1`.
@@ -271,6 +286,15 @@ Personal, work, a partner's shared calendar, subscribed holiday feeds.
 
 **Fix:** `calendar_id` per event, with per-calendar enable/disable. Holiday and
 subscription feeds default to off — they are noise in a briefing.
+
+**Status: partially built.** `calendar_id` is stored per event, so nothing
+downstream assumes a single calendar. The sync loop itself only syncs
+`"primary"` — `CalendarClient.list_calendars()` exists and works but nothing
+calls it yet. Per-calendar enable/disable needs a settings UI and a place to
+store which calendars are on, neither of which exists. Until then, connecting
+Google syncs your primary calendar only; shared and subscribed calendars are
+invisible rather than wrongly included, which is the safer of the two ways to
+be incomplete.
 
 ### 3.7 Events with restricted visibility
 Shared calendars often expose only "busy" with no title.

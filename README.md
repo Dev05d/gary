@@ -8,11 +8,14 @@ original message.
 file on your disk. Inference runs on Ollama, on this machine or another one on
 your LAN. Nothing is sent to a cloud API.
 
-> **Status: Milestone 2 of 8.**
-> Chat works end to end, and **Gmail now syncs live** into a structured facts
-> plane. Search, embeddings, commitment extraction, Calendar and iMessage are
-> Milestones 3+ and are **not built yet**. The status page tells you the truth
-> about what is wired up.
+> **Status: Milestone 2 of 8, plus Calendar and iMessage (6 and 7) built
+> ahead of schedule.**
+> Chat works end to end, and **Gmail, Google Calendar, and iMessage all sync
+> live** into a structured facts plane. Search, embeddings, commitment
+> extraction, and the agent tool loop (Milestones 3–5, 8) are **not built
+> yet** — Calendar and iMessage were pulled forward because they are more
+> connectors of the same shape Gmail already proved, not new architecture.
+> The status page tells you the truth about what is wired up.
 
 ---
 
@@ -129,7 +132,7 @@ There are two places to configure Gary, and the difference matters:
 
 - **`.env`** — bootstrap only. Enough to get the backend up: where Ollama is,
   which models to try, where the database lives. Read once at startup.
-- **The Settings page in the app** — everything else, 76 settings across 9
+- **The Settings page in the app** — everything else, 78 settings across 9
   categories, each with an explanation of what it does and what happens if you
   change it. Open it from the top bar.
 
@@ -238,16 +241,45 @@ enforced by Google, not just by Gary's own tool list.
 ### 9. Connect the account and start syncing
 
 Open **Data sources** in the sidebar → **Connect a Google account**. A Google
-tab opens; approve, and it closes itself.
+tab opens; approve, and it closes itself. One consent screen covers both —
+the OAuth scopes requested include `calendar.readonly` alongside
+`gmail.readonly`, so Gmail and Calendar both start syncing from this one step.
 
-From that moment Gary records new mail. **Nothing historical is imported** — the
-first sync stores a watermark and ingests nothing, so it completes instantly.
-Mail arriving afterwards shows up within a minute.
+From that moment Gary records new mail and calendar changes. **Nothing
+historical is imported** for Gmail — the first sync stores a watermark and
+ingests nothing, so it completes instantly. Mail arriving afterwards shows up
+within a minute. Calendar is the one exception to live-only: it syncs a
+*window* (7 days back, 90 forward) from the moment you connect, because a
+calendar's value is in the future and tomorrow's meeting was probably created
+last week.
 
-If you would rather not start from an empty database, set `seed_window_days`
+If you would rather not start from an empty mailbox, set `seed_window_days`
 to `7` in Settings before connecting. It pulls one recent week, once, capped.
 
 Check progress under **Status → Records begin** and **Index**.
+
+### 10. iMessage (macOS only, optional)
+
+Unlike Gmail and Calendar, there is no account to sign into — iMessage reads
+a read-only copy of this Mac's own `~/Library/Messages/chat.db`, so it only
+does anything useful when Gary is running directly on a Mac with a Messages
+history.
+
+It is **off by default**, deliberately more so than the OAuth-based sources:
+connecting Gmail is a consent screen you actively drive, while this is a
+background process reading a database that holds every message on the
+machine, so it does nothing until you explicitly turn it on.
+
+1. Grant **Full Disk Access** to whatever process runs Gary: System Settings
+   → Privacy & Security → Full Disk Access → add Terminal (or the Gary app),
+   then restart it.
+2. Open **Data sources** → **Enable iMessage**.
+
+That click doubles as the test: it tries a real read immediately rather than
+waiting for the next poll, so a missing Full Disk Access grant fails right
+there with a specific message instead of silently in the background. As with
+every other source, nothing historical is imported — only messages from the
+moment it is switched on.
 
 ---
 
@@ -255,15 +287,29 @@ Check progress under **Status → Records begin** and **Index**.
 
 - **Gmail sync** — live-only, watermark-based, idempotent, with label scoping,
   mirrored deletions, and recovery from expired history without a full import
-- **Structured facts plane** — messages, threads, identities, with the
-  denormalised columns behind "who haven't I replied to"
+- **Google Calendar sync** — windowed rather than watermarked, sync-token
+  deltas within that window, recurring events expanded to instances at ingest
+  so "what's on Tuesday" is an indexed range scan, cancellations kept as
+  tombstones rather than deleted
+- **iMessage sync** — reads a read-only copy of `chat.db` on this Mac,
+  decodes the `attributedBody` typedstream archive modern macOS stores text
+  in, groups messages into conversation-burst sessions, routes tapbacks away
+  from the message stream, off by default and opt-in per the trust model
+  above
+- **Structured facts plane** — messages, threads, identities, calendar
+  events, chats and chat sessions, with the denormalised columns behind
+  "who haven't I replied to"
 - **Data horizon** — Gary knows when its records begin and says so, rather than
   reporting a coverage gap as "nothing happened"
+- **Live settings, not just live chat** — every sync worker re-reads its
+  settings on each poll tick rather than the values captured at boot, so a
+  poll-interval change or flipping `imessage_enabled` takes effect within one
+  tick, no restart
 - Streaming chat with your local model, over SSE
 - Conversation history persisted in SQLite
 - Two-model routing: **Deep** / **Fast** toggle in the UI
 - Real token counting and context-window budgeting
-- **Settings page**: 76 documented settings, live connection testing, model
+- **Settings page**: 78 documented settings, live connection testing, model
   discovery, provenance tracking, and hot reload without a restart
 - Status page: backend reachability, per-role model availability, DB, counts
 - Optional bearer-token auth for non-localhost access
@@ -272,7 +318,7 @@ Check progress under **Status → Records begin** and **Index**.
 
 ## What is deliberately not built yet
 
-Gmail, Calendar, iMessage, search, embeddings, the agent tool loop,
+Search, embeddings, commitment/task extraction, the agent tool loop,
 notifications, and the daily briefing. See the roadmap below.
 
 ---
@@ -280,7 +326,7 @@ notifications, and the daily briefing. See the roadmap below.
 ## Testing it
 
 ```bash
-.venv/bin/python -m pytest              # 470 tests, no Ollama or accounts needed
+.venv/bin/python -m pytest              # 528 tests, no Ollama or accounts needed
 ```
 
 Manual smoke test:
@@ -315,9 +361,15 @@ In the UI, check that:
 | 3 | Commitments plane | Classify, extract tasks/deadlines, ground, reconcile | next |
 | 4 | Semantic plane | FTS5 + chunking + embeddings + hybrid retrieval | |
 | 5 | Agent | Query router + typed read-only tools over all three planes | |
-| 6 | Calendar | Windowed sync, link events to commitments | |
-| 7 | iMessage | Local read-only connector, session grouping | |
+| 6 | Calendar | Windowed sync, link events to commitments | **done**\* |
+| 7 | iMessage | Local read-only connector, session grouping | **done**\* |
 | 8 | Proactive | Notifications and the daily briefing | |
+
+\* Built out of order, at the user's request: Calendar and iMessage reuse the
+same connector/worker/sync-state shape Gmail already validated in Milestone 2,
+so pulling them forward did not require Milestones 3–5 first. Linking calendar
+events *to* commitments (the second half of Milestone 6's original scope)
+still depends on Milestone 3's extraction pipeline and remains open.
 
 **Ingestion is live-only.** Gary records a watermark when you connect an account
 and stores what arrives after it — no historical backfill. That keeps the first
@@ -333,8 +385,11 @@ created last week.
 
 ## Scope
 
-The next phase covers **Gmail, Google Calendar, and iMessage** only. Discord and
-Instagram are deferred — see below for why they are a different kind of problem.
+**Gmail, Google Calendar, and iMessage** are the full set of live connectors
+for this phase, and all three are now built. Discord and Instagram are
+deferred — see below for why they are a different kind of problem. The next
+phase is Milestone 3: turning what these three connectors ingest into
+classified, extracted, grounded commitments.
 
 ## A note on the connectors you asked for
 
@@ -381,14 +436,18 @@ else. See `docs/ARCHITECTURE.md` for the reasoning in full.
 backend/
   api/          HTTP routes + WebSocket event feed
   chat/         conversation persistence, prompt assembly
-  database/     SQLAlchemy models + async session
+  connectors/   gmail/, calendar/, imessage/ — one client + sync module each
+  database/     SQLAlchemy models, async session, Alembic migrations
   events/       normalised event bus
   llm/          provider abstraction, Ollama impl, model registry, budgeting
-  security/     prompt-injection guard, capabilities, API auth
+  pipeline/     identity resolution, label policy, horizon, image policy
+  security/     prompt-injection guard, capabilities, API auth, credential crypto
+  settings/     the settings catalog + database-override service
+  workers/      one poll loop per source, dispatched by kind
   config.py     all configuration, one place
   main.py       app factory
 frontend/       React + Vite + TypeScript
-tests/          470 tests, mock connectors, no live accounts required
+tests/          528 tests, mock connectors, no live accounts required
 docs/           architecture notes
 ```
 

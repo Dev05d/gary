@@ -87,6 +87,15 @@ class Settings(BaseSettings):
 
     # iMessage: consecutive messages closer together than this are one session,
     # which is the unit that gets summarised and embedded.
+    #
+    # Off by default. Unlike Gmail/Calendar, connecting is not an OAuth consent
+    # screen the user actively drives — it is a background process reading a
+    # local database that also holds every message on the machine, so the
+    # off-by-default here is deliberate: it does nothing until switched on.
+    imessage_enabled: bool = False
+    #: Overrides the default `~/Library/Messages/chat.db`. Almost never needed;
+    #: exists for a relocated home directory or a copy staged elsewhere.
+    imessage_db_path: Optional[str] = None
     imessage_session_gap_minutes: int = 30
     imessage_poll_interval_seconds: int = 30
 

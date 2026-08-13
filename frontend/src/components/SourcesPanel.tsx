@@ -75,6 +75,22 @@ export function SourcesPanel({ onClose, onChanged }: Props) {
     [load, onChanged],
   );
 
+  const connectIMessage = useCallback(async () => {
+    setBusy("imessage-connect");
+    try {
+      const result = await sourcesApi.connectIMessage();
+      setToast(result.message);
+      setError(null);
+      await load();
+      onChanged();
+    } catch (err) {
+      const e = err as Error & { detail?: { message: string } };
+      setError(e.detail?.message ?? e.message);
+    } finally {
+      setBusy(null);
+    }
+  }, [load, onChanged]);
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
@@ -134,12 +150,48 @@ export function SourcesPanel({ onClose, onChanged }: Props) {
           </section>
 
           <section className="status-section">
+            <h3>iMessage</h3>
+            <p className="setting-description">
+              Reads a read-only copy of this Mac's local Messages database —
+              there is no account to sign into. Requires{" "}
+              <strong>Full Disk Access</strong> for whatever process runs Gary
+              (System Settings → Privacy &amp; Security → Full Disk Access),
+              and only works when Gary is running directly on a Mac.
+            </p>
+
+            {data?.sources
+              .filter((s) => s.kind === "imessage")
+              .map((s) => (
+                <SourceRow
+                  key={s.id}
+                  source={s}
+                  busy={busy === s.id}
+                  onSync={() => syncNow(s.id)}
+                  onDisconnect={() => disconnect(s.id, s.display_name)}
+                />
+              ))}
+
+            {/* Always available, like "Connect a Google account" below — this
+                is also how a disconnected source (or one that failed its last
+                attempt) gets re-enabled, since the row above only offers
+                Check now / Disconnect. */}
+            <div className="setting-control" style={{ marginTop: 14 }}>
+              <button
+                className="send"
+                onClick={connectIMessage}
+                disabled={busy === "imessage-connect"}
+              >
+                {busy === "imessage-connect" ? "Checking…" : "Enable iMessage"}
+              </button>
+            </div>
+          </section>
+
+          <section className="status-section">
             <h3>Not built yet</h3>
             <p className="setting-description">
-              iMessage arrives in Milestone 7 and reads a read-only copy of this
-              Mac's local message database. Discord and Instagram do not expose
-              personal messages through any official API, so those will import
-              from the data-export archives you download from them.
+              Discord and Instagram do not expose personal messages through any
+              official API, so those will import from the data-export archives
+              you download from them rather than a live connection.
             </p>
           </section>
         </div>

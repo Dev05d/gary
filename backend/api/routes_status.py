@@ -35,8 +35,8 @@ router = APIRouter(prefix="/api", tags=["status"])
 #: status page always tells the truth about what is actually wired up.
 PLANNED_SOURCES = [
     ("gmail", "Gmail", True),
-    ("gcal", "Google Calendar", False),
-    ("imessage", "iMessage (local)", False),
+    ("gcal", "Google Calendar", True),
+    ("imessage", "iMessage (local)", True),
     ("discord_export", "Discord (data export)", False),
     ("instagram_export", "Instagram (data export)", False),
     ("files", "Local files", False),

@@ -218,75 +218,103 @@ client breaks threading.
 ## 4. Messages (iMessage)
 
 Structurally different enough that reusing the email tables would produce
-garbage. See [ARCHITECTURE.md §5](ARCHITECTURE.md).
+garbage. See [ARCHITECTURE.md §5](ARCHITECTURE.md). Implemented in
+`backend/database/models.py` (`Chat`, `ChatSession`, `ChatMessage`,
+`Reaction`) and `backend/connectors/imessage/`.
 
 ```sql
+im_chats                     -- one 1:1 or group conversation
+  id, source_id, source_chat_id UNIQUE,
+  display_name, is_group, service,         -- iMessage | SMS
+  participant_ids JSON,
+  last_message_at, last_inbound_at, last_outbound_at, message_count
+
 im_messages
   id, source_id, source_rowid UNIQUE, guid,
-  chat_id, from_identity_id,
+  chat_id, session_id, from_identity_id,
   text,
-  text_source,               -- 'text_column' | 'attributed_body' | 'attachment_only'
-  sent_at, is_from_me,
-  service,                   -- iMessage | SMS
-  is_edited, edited_at, is_unsent,
-  has_attachments,
-  session_id
+  text_source,                -- 'text_column' | 'attributed_body' | 'attachment_only' | 'empty'
+  sent_at, is_from_me, service,       -- iMessage | SMS
+  is_edited, is_unsent, has_attachments,
+  ingested_at, deleted_at
 
-reactions                    -- tapbacks are NOT messages
-  id, target_guid, from_identity_id, kind, added BOOL, created_at
+im_reactions                  -- tapbacks are NOT messages
+  id, source_id, source_rowid UNIQUE, target_guid,
+  from_identity_id, kind, removed BOOL, created_at
 
-sessions                     -- the unit of meaning
+im_sessions                   -- the unit of meaning
   id, chat_id, started_at, ended_at, message_count,
-  participant_identity_ids JSON, summary, embedded BOOL
+  participant_ids JSON, transcript, summary
 ```
 
-Three things that will silently corrupt the corpus if missed:
+Four things that will silently corrupt the corpus if missed:
 
 **Text is often not in the `text` column.** On macOS Ventura and later — and
 universally on macOS 26 — `message.text` is `NULL` and the content lives in
 `attributedBody` as an Apple *typedstream* archive (`NSArchiver`, not a modern
 `NSKeyedArchiver` bplist, so `plistlib` is the wrong tool). Proper
-deserialisation is required; `pytypedstream` handles it. Note that `NULL` text
-with `NULL` attributedBody usually means an attachment-only message, which
-needs the attachment join instead.
+deserialisation is required; `pytypedstream` reads the archive's events, but
+still needs care: the message text is the **first** `+`-typed string value in
+the stream, not the longest one — Messages.app writes an attribute-run key
+(`__kIMMessagePartAttributeName`, 29 characters) into every archive, and it
+beats any message shorter than that if you pick by length instead of position.
+`NULL` text with `NULL` attributedBody usually means an attachment-only
+message, which needs the attachment join instead — `text_source` records which
+of the four cases produced (or failed to produce) the stored text, which is
+what `text_coverage()` uses to catch a connector that decoded nothing while
+still reporting rows ingested.
 
 **Tapbacks are stored as messages.** `associated_message_type` 2000–2005 means
 a reaction was added, 3000–3005 removed. Ingesting these as messages fills the
-corpus with `Liked "sounds good"`. They belong in `reactions`, keyed to the
-target GUID.
+corpus with `Liked "sounds good"`. They belong in `im_reactions`, keyed to the
+target GUID, with `removed` distinguishing an added tapback from its retraction.
 
 **Timestamps are Apple epoch.** Nanoseconds since 2001-01-01 on modern macOS,
 *seconds* on older versions. Detect by magnitude and convert.
 
 Access is via an **immutable read-only copy** of `chat.db`, never the live
-file, which Messages.app holds open with WAL companions.
+file, which Messages.app holds open with WAL companions — and the copy runs
+through `asyncio.to_thread`, because `chat.db` can be hundreds of megabytes to
+a few gigabytes and copying it on the event loop would stall every other
+request for as long as the copy takes.
 
 ---
 
 ## 5. Calendar
+
+Implemented in `backend/database/models.py` (`CalendarEvent`) and
+`backend/connectors/calendar/`.
 
 ```sql
 calendar_events
   id, source_id, source_event_id UNIQUE, calendar_id,
   ical_uid, recurring_event_id,      -- links an instance to its series
   title, description, location,
-  starts_at, ends_at, timezone, all_day BOOL,
-  recurrence_rule,
+  starts_at, ends_at, all_day BOOL, local_date, timezone_name,
   organizer_identity_id,
   attendees JSON,                    -- handle + response status each
-  my_response,                       -- accepted | declined | tentative | needs_action
+  my_response,                       -- accepted | declined | tentative | needsAction
   status,                            -- confirmed | tentative | cancelled
   is_instance_exception BOOL,
-  updated_at, deleted_at
+  html_link, updated_at_remote, ingested_at, deleted_at
 ```
 
-Recurring events are stored as **expanded instances within the sync window**,
-not as a rule to evaluate at query time. "What do I have Tuesday?" must be an
-indexed range scan; expanding RRULEs during retrieval is both slow and a source
-of subtle correctness bugs around exceptions and DST.
+Recurring events are stored as **expanded instances within the sync window**
+(`singleEvents=True` on the Calendar API request), not as a rule to evaluate
+at query time. "What do I have Tuesday?" must be an indexed range scan;
+expanding RRULEs during retrieval is both slow and a source of subtle
+correctness bugs around exceptions and DST — there is deliberately no
+`recurrence_rule` column, since nothing ever needs to evaluate one.
+
+All-day events keep their **local date verbatim** (`local_date`, a plain
+`"2026-08-15"` string) alongside the sortable UTC `starts_at`. An event on the
+15th is the 15th in every timezone; converting it to a UTC instant and
+formatting that back would put it on the 14th for anyone west of Greenwich.
 
 `my_response` matters: a declined event is not on your calendar in any sense
-that should appear in a briefing.
+that should appear in a briefing — `status='cancelled'` events are kept as
+tombstones (`deleted_at` set, row retained) rather than deleted outright, so
+"what happened to lunch with Sarah" stays answerable.
 
 ---
 

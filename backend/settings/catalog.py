@@ -618,7 +618,7 @@ CATALOG: List[SettingDef] = [
         step=30,
         unit="seconds",
         milestone=6,
-        active=False,
+        active=True,
     ),
     SettingDef(
         key="calendar_future_days",
@@ -637,7 +637,7 @@ CATALOG: List[SettingDef] = [
         step=7,
         unit="days",
         milestone=6,
-        active=False,
+        active=True,
     ),
     SettingDef(
         key="calendar_past_days",
@@ -653,7 +653,41 @@ CATALOG: List[SettingDef] = [
         step=7,
         unit="days",
         milestone=6,
-        active=False,
+        active=True,
+    ),
+    SettingDef(
+        key="imessage_enabled",
+        label="iMessage sync",
+        description=(
+            "Read new messages from this Mac's local Messages database.\n\n"
+            "Off by default, unlike Gmail and Calendar: those are an explicit "
+            "OAuth consent screen you drive yourself, while this is a background "
+            "process reading a database that holds every message on the machine. "
+            "Turning it on requires Full Disk Access for whatever process runs "
+            "Gary (System Settings → Privacy & Security → Full Disk Access), and "
+            "only macOS has this database at all. As with every source, nothing "
+            "historical is imported — only messages from the moment this is "
+            "switched on."
+        ),
+        category="sync",
+        type="bool",
+        milestone=7,
+        active=True,
+    ),
+    SettingDef(
+        key="imessage_db_path",
+        label="Messages database path",
+        description=(
+            "Overrides the default `~/Library/Messages/chat.db`. Leave this "
+            "blank unless the database has been relocated or you are pointing "
+            "Gary at a staged copy — almost nobody needs to set this."
+        ),
+        category="sync",
+        type="string",
+        placeholder="~/Library/Messages/chat.db",
+        milestone=7,
+        active=True,
+        advanced=True,
     ),
     SettingDef(
         key="imessage_poll_interval_seconds",
@@ -670,7 +704,7 @@ CATALOG: List[SettingDef] = [
         step=5,
         unit="seconds",
         milestone=7,
-        active=False,
+        active=True,
     ),
     SettingDef(
         key="imessage_session_gap_minutes",
@@ -691,7 +725,7 @@ CATALOG: List[SettingDef] = [
         step=5,
         unit="minutes",
         milestone=7,
-        active=False,
+        active=True,
     ),
     SettingDef(
         key="gmail_label_mode",

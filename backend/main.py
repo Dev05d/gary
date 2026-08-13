@@ -32,7 +32,7 @@ from backend.database.session import (
 from backend.events.bus import get_bus
 from backend.llm.registry import LLMRegistry, set_registry
 from backend.settings.service import SettingsService, set_settings_service
-from backend.workers.gmail_worker import poll_forever
+from backend.workers import calendar_worker, gmail_worker, imessage_worker
 from backend.version import VERSION
 
 log = logging.getLogger("gary")
@@ -80,8 +80,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     stop_workers = asyncio.Event()
     app.state.stop_workers = stop_workers
+    # Each worker reads `app.state.settings` fresh on every pass rather than
+    # closing over the `settings` local above, so a poll-interval or
+    # `imessage_enabled` change made in the Settings UI takes effect on the
+    # worker's next tick instead of requiring a restart.
     app.state.worker_tasks = [
-        asyncio.create_task(poll_forever(settings, stop_workers), name="gmail-worker")
+        asyncio.create_task(gmail_worker.poll_forever(app, stop_workers), name="gmail-worker"),
+        asyncio.create_task(calendar_worker.poll_forever(app, stop_workers), name="calendar-worker"),
+        asyncio.create_task(imessage_worker.poll_forever(app, stop_workers), name="imessage-worker"),
     ]
 
     log.info("Gary v%s ready on http://%s:%s", VERSION, settings.app_host, settings.app_port)

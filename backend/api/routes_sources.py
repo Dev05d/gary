@@ -284,23 +284,33 @@ async def disconnect(
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found")
 
-    settings = _settings(request)
-    credential = (
-        await session.execute(
-            select(OAuthCredential).where(OAuthCredential.source_id == source_id)
-        )
-    ).scalar_one_or_none()
-
-    if credential is not None:
-        # Best effort: tell Google to invalidate it, then drop our copy either way.
-        try:
-            token = get_cipher(settings.credential_encryption_key).decrypt(
-                credential.encrypted_token, aad=credential.account_email
+    if source.kind == "imessage":
+        # `imessage_enabled` is the poll loop's master switch. Turning off
+        # only the Source row is not enough — the next tick would see the
+        # setting still on, treat a disabled-but-still-enabled-by-setting row
+        # as one that needs re-enabling, and undo the disconnect within one
+        # poll interval.
+        service = request.app.state.settings_service
+        new_settings, _, _ = await service.apply(session, {"imessage_enabled": False})
+        request.app.state.settings = new_settings
+    else:
+        settings = _settings(request)
+        credential = (
+            await session.execute(
+                select(OAuthCredential).where(OAuthCredential.source_id == source_id)
             )
-            await oauth.revoke(token)
-        except (EncryptionError, Exception):  # noqa: BLE001
-            log.warning("could not revoke token for %s", source_id, exc_info=True)
-        await session.delete(credential)
+        ).scalar_one_or_none()
+
+        if credential is not None:
+            # Best effort: tell Google to invalidate it, then drop our copy either way.
+            try:
+                token = get_cipher(settings.credential_encryption_key).decrypt(
+                    credential.encrypted_token, aad=credential.account_email
+                )
+                await oauth.revoke(token)
+            except (EncryptionError, Exception):  # noqa: BLE001
+                log.warning("could not revoke token for %s", source_id, exc_info=True)
+            await session.delete(credential)
 
     source.status = "disconnected"
     source.enabled = False
@@ -319,7 +329,7 @@ async def sync_now(
     source_id: str, request: Request, session: AsyncSession = Depends(get_session)
 ) -> SyncNowResponse:
     """Run one sync immediately, rather than waiting for the poll interval."""
-    from backend.workers.gmail_worker import sync_source
+    from backend.workers.dispatch import sync_source
 
     source = await session.get(Source, source_id)
     if source is None:
@@ -332,3 +342,56 @@ async def sync_now(
     if error:
         return SyncNowResponse(ran=False, error=error)
     return SyncNowResponse(ran=True, summary=outcome.summary() if outcome else "")
+
+
+class IMessageConnectResponse(BaseModel):
+    connected: bool
+    message: str = ""
+
+
+@router.post(
+    "/imessage/connect",
+    response_model=IMessageConnectResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def connect_imessage(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> IMessageConnectResponse:
+    """Turn on iMessage sync.
+
+    There is no OAuth redirect for a local file, so "connect" means: flip the
+    master switch, then immediately try a real sync pass rather than waiting
+    up to a full poll interval. That first pass doubles as the probe — a
+    missing Full Disk Access grant, or a database in the wrong place, fails
+    here with a specific message the user can act on, instead of failing
+    silently in the background where it would only surface later on this
+    same page as a `last_error`.
+    """
+    from backend.workers.imessage_worker import ensure_source
+    from backend.workers.imessage_worker import sync_source as imessage_sync
+
+    service = request.app.state.settings_service
+    new_settings, _, _ = await service.apply(session, {"imessage_enabled": True})
+    request.app.state.settings = new_settings
+
+    source = await ensure_source(session)
+    outcome, error = await imessage_sync(session, source=source, settings=new_settings)
+
+    if error:
+        # Roll the switch back off: a failed first attempt should not leave a
+        # background loop retrying every tick against a path known to fail.
+        reverted, _, _ = await service.apply(session, {"imessage_enabled": False})
+        request.app.state.settings = reverted
+        await session.commit()
+        raise HTTPException(
+            status_code=400, detail={"key": "imessage_db_path", "message": error}
+        )
+
+    await session.commit()
+    return IMessageConnectResponse(
+        connected=True,
+        message=(
+            "Gary is now watching iMessage on this Mac. Only messages from "
+            "this moment on are stored — nothing historical is imported."
+        ),
+    )

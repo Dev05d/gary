@@ -1,13 +1,9 @@
-"""Background Gmail polling.
+"""Background Google Calendar polling.
 
-Polling rather than Pub/Sub, deliberately: push needs a public HTTPS endpoint
-Google can reach, which on a laptop means running a tunnel and letting a third
-party see your notification traffic. `history.list` against a watermark is one
-cheap call that returns nothing when idle.
-
-Scheduling is **interval-since-last-success**, not wall-clock. A laptop that
-slept through a cron tick would silently skip it; this notices the gap on wake
-and catches up.
+Structurally the same shape as the Gmail worker — same OAuth credential (the
+scopes requested at connect time cover both), same polling loop, same
+backoff — but the sync itself works over a window rather than a watermark. See
+`backend/connectors/calendar/client.py` for why.
 """
 
 from __future__ import annotations
@@ -15,21 +11,19 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from typing import TYPE_CHECKING, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import Settings
-from backend.connectors.gmail import oauth
-from backend.connectors.gmail.client import GmailAuthError, GmailClient, GmailError
-from backend.connectors.gmail.sync import SyncOutcome, record_failure, sync_once
-from backend.database.models import Identity, OAuthCredential, Source, SyncState, utcnow
+from backend.connectors.calendar.client import CalendarAuthError, CalendarClient, CalendarError
+from backend.connectors.calendar.sync import CalendarSyncOutcome, sync_calendar_once
+from backend.database.models import OAuthCredential, Source, SyncState, utcnow
 from backend.database.session import session_scope
 from backend.events.bus import get_bus
-from backend.pipeline.label_policy import LabelPolicy
 from backend.security.crypto import EncryptionError, get_cipher
-from backend.workers.scheduling import due
+from backend.workers.scheduling import due, record_failure
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -37,28 +31,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-async def my_addresses(session: AsyncSession) -> Set[str]:
-    """The user's own addresses, derived from what has been seen in SENT.
-
-    Seeding this from the connected account alone misses send-as aliases and
-    custom domains — and a missed alias makes "who haven't I replied to" wrong
-    from the first message, because your own replies count as inbound.
-    """
-    rows = (
-        await session.execute(select(Identity.value_normalized).where(Identity.is_me.is_(True)))
-    ).scalars().all()
-    accounts = (
-        await session.execute(
-            select(Source.account_identifier).where(Source.account_identifier.isnot(None))
-        )
-    ).scalars().all()
-    return {r for r in rows if r} | {a.lower() for a in accounts if a}
-
-
 async def _access_token(
     session: AsyncSession, source: Source, settings: Settings
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Refresh and return an access token, or an error to report."""
+    """Same credential Gmail uses — `calendar.readonly` was requested alongside
+    `gmail.readonly` in the one consent screen, so there is nothing separate to
+    connect."""
+    from backend.connectors.gmail import oauth
+
     credential = (
         await session.execute(
             select(OAuthCredential).where(
@@ -69,7 +49,7 @@ async def _access_token(
     ).scalar_one_or_none()
 
     if credential is None:
-        return None, "No stored credential. Reconnect the account."
+        return None, "No stored credential. Reconnect the Google account from Sources."
 
     try:
         refresh_token = get_cipher(settings.credential_encryption_key).decrypt(
@@ -85,7 +65,6 @@ async def _access_token(
             client_secret=settings.google_client_secret or "",
         )
     except oauth.ReauthRequired as exc:
-        # Terminal. Retrying invalid_grant never succeeds.
         source.status = "reauth_required"
         source.last_error = str(exc)
         return None, str(exc)
@@ -99,9 +78,9 @@ async def _access_token(
 
 async def sync_source(
     session: AsyncSession, *, source: Source, settings: Settings
-) -> Tuple[Optional[SyncOutcome], Optional[str]]:
+) -> Tuple[Optional[CalendarSyncOutcome], Optional[str]]:
     """One sync pass for one source. Returns (outcome, error)."""
-    if source.kind != "gmail":
+    if source.kind != "gcal":
         return None, f"{source.kind} sync is not implemented yet."
     if not source.enabled:
         return None, "Source is disabled."
@@ -111,42 +90,37 @@ async def sync_source(
         await record_failure(session, source_id=source.id, error=error)
         return None, error
 
-    policy = LabelPolicy.from_settings(
-        settings.gmail_label_mode,
-        settings.gmail_include_labels,
-        settings.gmail_exclude_labels,
-    )
-    client = GmailClient(token or "", timeout=settings.ollama_timeout)
+    client = CalendarClient(token or "", timeout=settings.ollama_timeout)
     try:
-        outcome = await sync_once(
+        outcome = await sync_calendar_once(
             session,
             client,
             source_id=source.id,
-            policy=policy,
-            my_addresses=await my_addresses(session),
-            mirror_deletions=settings.mirror_upstream_deletions,
+            past_days=settings.calendar_past_days,
+            future_days=settings.calendar_future_days,
         )
         source.status = "connected"
         source.last_sync_at = utcnow()
         source.last_error = None
 
-        if outcome.ingested or outcome.deleted:
+        if outcome.created or outcome.updated or outcome.cancelled:
             await get_bus().emit(
-                "gmail",
-                "gmail.sync.completed",
+                "gcal",
+                "calendar.sync.completed",
                 source_id=source.id,
-                ingested=outcome.ingested,
-                deleted=outcome.deleted,
+                created=outcome.created,
+                updated=outcome.updated,
+                cancelled=outcome.cancelled,
                 summary=outcome.summary(),
             )
         return outcome, None
 
-    except GmailAuthError as exc:
+    except CalendarAuthError as exc:
         source.status = "reauth_required"
         source.last_error = str(exc)
         await record_failure(session, source_id=source.id, error=str(exc))
         return None, str(exc)
-    except GmailError as exc:
+    except CalendarError as exc:
         source.last_error = str(exc)
         await record_failure(session, source_id=source.id, error=str(exc))
         return None, str(exc)
@@ -157,30 +131,22 @@ async def sync_source(
 async def poll_forever(app: "FastAPI", stop: asyncio.Event) -> None:
     """The worker loop.
 
-    Runs in the same process as the API. Ingestion is I/O-bound and the volume
-    is a day's mail, so a separate process would buy nothing and cost the
-    single-writer guarantee that keeps SQLite contention away.
-
-    Settings are re-read from `app.state` on every pass rather than captured
-    once at startup. They used to be captured once — which meant a poll
-    interval or label-policy change made in the Settings UI silently had no
-    effect on this loop until the process restarted, contradicting the
-    settings API's own "applied live" response. `app.state.settings` is
-    swapped to a new object on every save, so reading it fresh each tick is
-    enough to pick that up.
+    Settings are re-read from `app.state` on every pass, not captured once at
+    startup — a poll-interval or window change made in the Settings UI takes
+    effect on the next tick rather than needing a restart nobody is told about.
     """
-    log.info("Gmail worker started")
+    log.info("Calendar worker started")
 
     while not stop.is_set():
         settings: Settings = app.state.settings
-        interval = timedelta(seconds=settings.gmail_poll_interval_seconds)
+        interval = timedelta(seconds=settings.calendar_poll_interval_seconds)
 
         try:
             async with session_scope() as session:
                 sources = (
                     await session.execute(
                         select(Source).where(
-                            Source.kind == "gmail",
+                            Source.kind == "gcal",
                             Source.enabled.is_(True),
                             Source.status.in_(("connected", "syncing")),
                         )
@@ -195,18 +161,18 @@ async def poll_forever(app: "FastAPI", stop: asyncio.Event) -> None:
                         session, source=source, settings=settings
                     )
                     if error:
-                        log.warning("gmail sync failed for %s: %s", source.id, error)
-                    elif outcome and (outcome.ingested or outcome.deleted):
-                        log.info("gmail sync: %s", outcome.summary())
+                        log.warning("calendar sync failed for %s: %s", source.id, error)
+                    elif outcome and outcome.summary() != "no changes":
+                        log.info("calendar sync: %s", outcome.summary())
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - the loop must survive anything
-            log.exception("gmail worker iteration failed")
+            log.exception("calendar worker iteration failed")
 
-        tick = max(15, min(settings.gmail_poll_interval_seconds, 60))
+        tick = max(15, min(settings.calendar_poll_interval_seconds, 60))
         try:
             await asyncio.wait_for(stop.wait(), timeout=tick)
         except asyncio.TimeoutError:
             continue
 
-    log.info("Gmail worker stopped")
+    log.info("Calendar worker stopped")

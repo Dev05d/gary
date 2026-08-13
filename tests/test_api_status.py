@@ -46,11 +46,12 @@ async def test_connector_status_is_reported_honestly(client):
     body = (await client.get("/api/status")).json()
     kinds = {s["kind"]: s for s in body["sources"]}
 
-    assert kinds["gmail"]["implemented"] is True
-    assert kinds["gmail"]["status"] == "disconnected", "built, but no account linked"
+    for kind in ("gmail", "gcal", "imessage"):
+        assert kinds[kind]["implemented"] is True
+        assert kinds[kind]["status"] == "disconnected", f"{kind}: built, but nothing connected"
 
-    assert kinds["imessage"]["implemented"] is False
-    assert kinds["imessage"]["status"] == "not_implemented"
+    assert kinds["discord_export"]["implemented"] is False
+    assert kinds["discord_export"]["status"] == "not_implemented"
 
 
 async def test_status_reports_the_facts_plane(client):

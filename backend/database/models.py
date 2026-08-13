@@ -446,3 +446,219 @@ class OAuthCredential(Base):
     __table_args__ = (
         UniqueConstraint("provider", "account_email", name="uq_credential_account"),
     )
+
+
+# ===========================================================================
+# Calendar (Milestone 6)
+#
+# Calendar syncs a *window*, not a watermark. A calendar's value is in the
+# future, and tomorrow's meeting was created last week — a "from now on" rule
+# would make exactly the events you care about invisible.
+# ===========================================================================
+
+
+class CalendarEvent(Base):
+    """One event instance.
+
+    Recurring series are stored as **expanded instances** within the sync
+    window rather than as a rule. "What do I have Tuesday?" must be an indexed
+    range scan; expanding RRULEs at query time is both slow and subtly wrong
+    around exceptions and DST.
+    """
+
+    __tablename__ = "calendar_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    source_event_id: Mapped[str] = mapped_column(String(400), nullable=False)
+    calendar_id: Mapped[str] = mapped_column(String(400), default="primary")
+
+    ical_uid: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
+    #: Links an instance back to its series.
+    recurring_event_id: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
+    is_instance_exception: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    title: Mapped[str] = mapped_column(String(1000), default="")
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    location: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: An all-day event on the 15th is the 15th *locally*. Storing it as UTC
+    #: midnight puts it on the 14th for anyone west of Greenwich, so the local
+    #: date is kept verbatim alongside the instant.
+    all_day: Mapped[bool] = mapped_column(Boolean, default=False)
+    local_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    timezone_name: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+
+    organizer_identity_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
+    )
+    attendees: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    #: accepted | declined | tentative | needsAction. A declined event is not
+    #: on your calendar in any sense a briefing should mention.
+    my_response: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="confirmed")
+
+    html_link: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    updated_at_remote: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "source_event_id", name="uq_event_source"),
+        Index("ix_events_starts", "starts_at"),
+        Index("ix_events_range", "starts_at", "ends_at"),
+        Index("ix_events_series", "recurring_event_id"),
+    )
+
+
+# ===========================================================================
+# iMessage (Milestone 7)
+#
+# Structurally different enough from email that reusing those tables would
+# produce garbage: the unit of meaning is a conversation *session*, not a
+# message. "friday works" means nothing alone.
+# ===========================================================================
+
+
+class Chat(Base):
+    """An iMessage conversation — 1:1 or group."""
+
+    __tablename__ = "im_chats"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    source_chat_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(300), default="")
+    is_group: Mapped[bool] = mapped_column(Boolean, default=False)
+    participant_ids: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    service: Mapped[str] = mapped_column(String(20), default="iMessage")  # iMessage|SMS
+
+    last_message_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_inbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_outbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "source_chat_id", name="uq_chat_source"),
+        Index("ix_chats_last_message", "last_message_at"),
+    )
+
+
+class ChatSession(Base):
+    """A burst of messages with no long gap — the unit that gets embedded.
+
+    500 messages a day becomes roughly 20 sessions, which is both a sane
+    amount of LLM work and the only granularity at which a short reply carries
+    meaning.
+    """
+
+    __tablename__ = "im_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("im_chats.id", ondelete="CASCADE"), nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    participant_ids: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    transcript: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("ix_sessions_chat_started", "chat_id", "started_at"),)
+
+
+class ChatMessage(Base):
+    """One iMessage. Full fidelity, even though sessions are what get embedded."""
+
+    __tablename__ = "im_messages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    #: chat.db ROWID — monotonic, so it is the watermark. Never used for
+    #: ordering, because iCloud sync delivers older messages with newer ROWIDs.
+    source_rowid: Mapped[int] = mapped_column(Integer, nullable=False)
+    guid: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    chat_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("im_chats.id", ondelete="CASCADE"), nullable=True
+    )
+    session_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("im_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    from_identity_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
+    )
+
+    text: Mapped[str] = mapped_column(Text, default="")
+    #: text_column | attributed_body | attachment_only | empty. Recorded so
+    #: coverage is measurable: on recent macOS the plain column is usually
+    #: NULL, and a connector that silently ingested nothing would look healthy.
+    text_source: Mapped[str] = mapped_column(String(30), default="text_column")
+
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_from_me: Mapped[bool] = mapped_column(Boolean, default=False)
+    service: Mapped[str] = mapped_column(String(20), default="iMessage")
+
+    is_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_unsent: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_attachments: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "source_rowid", name="uq_im_message_rowid"),
+        Index("ix_im_messages_sent", "sent_at"),
+        Index("ix_im_messages_chat_sent", "chat_id", "sent_at"),
+        Index("ix_im_messages_session", "session_id"),
+    )
+
+
+class Reaction(Base):
+    """A tapback.
+
+    NOT a message. `associated_message_type` 2000–2005 means a reaction was
+    added and 3000–3005 removed; ingesting those as messages fills the corpus
+    with 'Liked "sounds good"', poisons embeddings, and inflates every count.
+    """
+
+    __tablename__ = "im_reactions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    source_rowid: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_guid: Mapped[str] = mapped_column(String(200), default="")
+    from_identity_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), default="like")
+    removed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "source_rowid", name="uq_im_reaction_rowid"),
+        Index("ix_reactions_target", "target_guid"),
+    )
